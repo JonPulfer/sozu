@@ -247,7 +247,7 @@ impl CommandServer {
         if counter > 0 {
           info!("state loaded from {}, will start sending {} messages to workers", path, counter);
           let id = message_id.to_string();
-          executor::Ex::execute(spawn(Box::new(
+          executor::Ex::execute(
             join_all(futures).map(move |v| {
               info!("load_state: {} messages loaded", v.len());
               info!("WILL SEND TO TOKEN: {:?}", token_opt);
@@ -260,7 +260,7 @@ impl CommandServer {
             }).map_err(|e| {
               error!("load_state error: {}", e);
             })
-          )));
+          );
         } else {
           info!("no messages sent to workers: local state already had those messages");
           if let Some(_) = self.order_state.state.remove(message_id) {
@@ -494,7 +494,7 @@ impl CommandServer {
       (*metrics.borrow_mut()).dump_process_data()
     });
 
-    executor::Ex::execute(spawn(Box::new(
+    executor::Ex::execute(
       join_all(futures).map(move |v| {
         info!("metrics order: {} workers", &v.len());
         let mut data: BTreeMap<String, MetricsData> = v.into_iter().filter_map(|(tag, metrics)| {
@@ -520,7 +520,7 @@ impl CommandServer {
       }).map_err(|e| {
         error!("metrics error: {}", e);
       })
-    )));
+    );
   }
 
   pub fn query(&mut self, token: FrontToken, message_id: &str, query: Query) {

@@ -134,9 +134,9 @@ impl Ex {
     }
   }
 
-  pub fn execute(s: Spawn<Box<Future<Item = (), Error = ()> + Send>>) {
+  pub fn execute(s: impl Future<Item = (), Error = ()> + Send + 'static) {
     let mut inner = EXECUTOR.inner.lock().unwrap();
-    if let Ok(id) = inner.tasks.insert(s) {
+    if let Ok(id) = inner.tasks.insert(spawn(Box::new(s))) {
       inner.ready.insert(id);
     }
   }
@@ -259,25 +259,24 @@ mod tests {
 
   #[test]
   fn executor() {
-    Ex::execute(spawn(
-      Box::new(lazy(||{
-        let (processing, msg_future) = send_processing(Token(0), OrderMessage { id: "test".to_string(), order: Order::Status });
-        processing.for_each(|msg| {
-          println!("TEST: got processing message: {:?}", msg);
-          Ok(())
-        }).join(msg_future.map(|msg| {
-            println!("TEST: future got msg: {:?}", msg);
-            Ex::send_client(FrontToken(1), ConfigMessageAnswer::new(
-              "test".to_string(),
-              ConfigMessageStatus::Ok,
-              "ok".to_string(),
-              None
-            ));
-          }).map_err(|e| {
-            println!("TEST: got error: {:?}", e);
-          })
-        ).map(|_| ())
-      }))));
+    Ex::execute(lazy(||{
+      let (processing, msg_future) = send_processing(Token(0), OrderMessage { id: "test".to_string(), order: Order::Status });
+      processing.for_each(|msg| {
+        println!("TEST: got processing message: {:?}", msg);
+        Ok(())
+      }).join(msg_future.map(|msg| {
+          println!("TEST: future got msg: {:?}", msg);
+          Ex::send_client(FrontToken(1), ConfigMessageAnswer::new(
+            "test".to_string(),
+            ConfigMessageStatus::Ok,
+            "ok".to_string(),
+            None
+          ));
+        }).map_err(|e| {
+          println!("TEST: got error: {:?}", e);
+        })
+      ).map(|_| ())
+    }));
     Ex::run();
 
     Ex::handle_message(Token(0), OrderMessageAnswer{
