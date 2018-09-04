@@ -5,7 +5,7 @@ use std::io::{self,Read,Write};
 use std::convert::Into;
 use std::thread::sleep;
 use std::time::Duration;
-use std::collections::HashMap;
+use std::collections::{HashMap,BTreeMap};
 use std::os::unix::io::{AsRawFd,FromRawFd};
 use slab::Slab;
 use serde_json;
@@ -17,9 +17,10 @@ use nom::{Err,HexDisplay,Offset};
 use sozu_command::buffer::Buffer;
 use sozu_command::channel::Channel;
 use sozu_command::scm_socket::{Listeners, ScmSocket};
-use sozu_command::messages::{Order,OrderMessage,Query};
+use sozu_command::messages::{Order, OrderMessage, Query, MetricsData, AggregatedMetricsData,OrderMessageAnswerData};
 use sozu_command::data::{AnswerData,ConfigCommand,ConfigMessage,ConfigMessageAnswer,ConfigMessageStatus,RunState,WorkerInfo};
 use sozu_command::logging;
+use sozu::network::metrics::METRICS;
 
 use super::{CommandServer,FrontToken,Worker};
 use super::client::parse;
@@ -27,6 +28,11 @@ use super::state::{MessageType,OrderState};
 use worker::{start_worker,get_executable_path};
 use upgrade::{start_new_master_process,SerializedWorker,UpgradeData};
 use util;
+
+use super::executor;
+use futures::executor::spawn;
+use futures::future::join_all;
+use futures::Future;
 
 impl CommandServer {
   pub fn handle_client_message(&mut self, token: FrontToken, message: &ConfigMessage) {
@@ -152,11 +158,12 @@ impl CommandServer {
       Ok(mut file) => {
         //let mut data = vec!();
         let mut buffer = Buffer::with_capacity(200000);
-        self.order_state.insert_task(message_id, MessageType::LoadState, token_opt);
+        //self.order_state.insert_task(message_id, MessageType::LoadState, token_opt);
 
         info!("starting to load state from {}", path);
 
         let mut counter = 0;
+        let mut futures = Vec::new();
         loop {
           let previous = buffer.available_data();
           //FIXME: we should read in streaming here
@@ -207,8 +214,12 @@ impl CommandServer {
                 for ref mut proxy in self.proxies.values_mut()
                   .filter(|worker| worker.run_state != RunState::Stopping && worker.run_state != RunState::Stopped) {
                   let o = order.clone();
-                  proxy.push_message(OrderMessage { id: id.clone(), order: o });
+                  /*proxy.push_message(OrderMessage { id: id.clone(), order: o });
                   self.order_state.insert_worker_message(message_id, &id, proxy.token.expect("worker should have a token"));
+                  */
+                  futures.push(
+                    executor::send(proxy.token.expect("worker should have a token"), OrderMessage { id: id.clone(), order: o })
+                  );
                   found = true;
 
                 }
@@ -234,7 +245,22 @@ impl CommandServer {
           buffer.consume(offset);
         }
         if counter > 0 {
-        info!("state loaded from {}, will start sending {} messages to workers", path, counter);
+          info!("state loaded from {}, will start sending {} messages to workers", path, counter);
+          let id = message_id.to_string();
+          executor::Ex::execute(spawn(Box::new(
+            join_all(futures).map(move |v| {
+              info!("load_state: {} messages loaded", v.len());
+              info!("WILL SEND TO TOKEN: {:?}", token_opt);
+              executor::Ex::send_client(token_opt.unwrap(), ConfigMessageAnswer::new(
+                id,
+                ConfigMessageStatus::Ok,
+                format!("ok: {} messages, error: 0", v.len()),
+                None
+              ));
+            }).map_err(|e| {
+              error!("load_state error: {}", e);
+            })
+          )));
         } else {
           info!("no messages sent to workers: local state already had those messages");
           if let Some(_) = self.order_state.state.remove(message_id) {
@@ -443,16 +469,58 @@ impl CommandServer {
   }
 
   pub fn metrics(&mut self, token: FrontToken, message_id: &str) {
-    self.order_state.insert_task(message_id, MessageType::Metrics, Some(token));
+    let mut futures = Vec::new();
+    let id = message_id.to_string();
+    //self.order_state.insert_task(message_id, MessageType::Metrics, Some(token));
 
     for ref mut proxy in self.proxies.values_mut()
       .filter(|worker| worker.run_state != RunState::Stopping && worker.run_state != RunState::Stopped) {
 
+      /*
       self.order_state.insert_worker_message(message_id, message_id, proxy.token.expect("worker should have a valid token"));
       trace!("sending to {:?}, inflight is now {:#?}", proxy.token.expect("worker should have a valid token").0, self.order_state);
 
       proxy.push_message(OrderMessage { id: String::from(message_id), order: Order::Metrics });
+      */
+      let tag = proxy.id.to_string();
+      futures.push(
+        executor::send(
+          proxy.token.expect("worker should have a token"),
+          OrderMessage { id: id.clone(), order: Order::Metrics }).map(|data| (tag, data))
+      );
     }
+
+    let master_metrics = METRICS.with(|metrics| {
+      (*metrics.borrow_mut()).dump_process_data()
+    });
+
+    executor::Ex::execute(spawn(Box::new(
+      join_all(futures).map(move |v| {
+        info!("metrics order: {} workers", &v.len());
+        let mut data: BTreeMap<String, MetricsData> = v.into_iter().filter_map(|(tag, metrics)| {
+          if let Some(OrderMessageAnswerData::Metrics(d)) = metrics.data {
+            Some((tag, d))
+          } else {
+            None
+          }
+        }).collect();
+
+        let aggregated_data = AggregatedMetricsData {
+          master: master_metrics,
+          workers: data,
+        };
+
+        info!("WILL SEND TO TOKEN: {:?}", token);
+        executor::Ex::send_client(token, ConfigMessageAnswer::new(
+          id,
+          ConfigMessageStatus::Ok,
+          String::new(),
+          Some(AnswerData::Metrics(aggregated_data))
+        ));
+      }).map_err(|e| {
+        error!("metrics error: {}", e);
+      })
+    )));
   }
 
   pub fn query(&mut self, token: FrontToken, message_id: &str, query: Query) {

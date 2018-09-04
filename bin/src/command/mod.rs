@@ -30,6 +30,7 @@ pub mod state;
 use worker::{start_worker, get_executable_path};
 use self::client::CommandClient;
 use self::state::MessageType;
+use self::executor::Ex;
 
 const SERVER: Token = Token(0);
 const HALF_USIZE: usize = 0x8000000000000000usize;
@@ -275,6 +276,15 @@ impl CommandServer {
           break;
         }
       }
+      Ex::run();
+
+      while let Some((client_token, answer)) = Ex::get_client_message() {
+        self.clients.get_mut(client_token).map(|cl| cl.push_message(answer));
+      }
+
+      while let Some((worker_token, message)) = Ex::get_worker_message() {
+        self.proxies.get_mut(&worker_token).map(|w| w.push_message(message));
+      }
 
       METRICS.with(|metrics| {
         (*metrics.borrow_mut()).send_data();
@@ -497,6 +507,18 @@ impl CommandServer {
   }
 
   fn handle_worker_message(&mut self, token: Token, msg: OrderMessageAnswer) {
+    //FIXME: handle stop messages
+    Ex::handle_message(token, msg);
+    Ex::run();
+
+    while let Some((client_token, answer)) = Ex::get_client_message() {
+      self.clients.get_mut(client_token).map(|cl| cl.push_message(answer));
+    }
+
+    while let Some((worker_token, message)) = Ex::get_worker_message() {
+      self.proxies.get_mut(&worker_token).map(|w| w.push_message(message));
+    }
+    /*
     trace!("worker handle message: token {:?} got answer msg: {:?}", token, msg);
     if msg.status != OrderMessageStatus::Processing {
 
@@ -563,6 +585,7 @@ impl CommandServer {
         }
       }
     }
+    */
   }
 
   pub fn check_worker_status(&mut self, token: Token) {
