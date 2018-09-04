@@ -22,6 +22,7 @@ use sozu_command::data::{ConfigMessage,ConfigMessageAnswer,ConfigMessageStatus,R
 use sozu_command::messages::{OrderMessage,OrderMessageAnswer,OrderMessageStatus};
 use sozu_command::scm_socket::{Listeners,ScmSocket};
 
+pub mod executor;
 pub mod orders;
 pub mod client;
 pub mod state;
