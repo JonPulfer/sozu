@@ -11,8 +11,8 @@ use sozu_command::data::ConfigMessageAnswer;
 use super::FrontToken;
 
 lazy_static! {
-  static ref EXECUTOR: Arc<Ex> = {
-    Arc::new(Ex {
+  static ref EXECUTOR: Arc<Executor> = {
+    Arc::new(Executor {
       to_notify: Mutex::new(HashMap::new()),
       inner: Mutex::new(Runner::new()),
       messages: Mutex::new(HashMap::new()),
@@ -23,7 +23,7 @@ lazy_static! {
   };
 }
 
-pub struct Ex {
+pub struct Executor {
   pub inner: Mutex<Runner>,
   pub to_notify: Mutex<HashMap<(Token, String, MessageStatus), Task>>,
   pub messages: Mutex<HashMap<(Token, String, MessageStatus), OrderMessageAnswer>>,
@@ -81,7 +81,7 @@ impl Runner {
   }
 }
 
-impl Ex {
+impl Executor {
   pub fn register(worker: Token, message_id: &str, status: MessageStatus, task: Task) {
     //println!("register({:?}, {}, {:?})", worker, message_id, task);
     let mut to_notify = EXECUTOR.to_notify.lock().unwrap();
@@ -183,7 +183,7 @@ impl Ex {
   }
 }
 
-impl Notify for Ex {
+impl Notify for Executor {
   fn notify(&self, id: usize) {
     let mut inner = self.inner.lock().unwrap();
     inner.ready.insert(id);
@@ -200,7 +200,7 @@ impl Future for FutureAnswer {
   type Error = String;
   fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
     //FIXME: handle workers disconnected
-    match Ex::get_message(self.worker_id, &self.message_id, MessageStatus::Other) {
+    match Executor::get_message(self.worker_id, &self.message_id, MessageStatus::Other) {
       Some(message) => {
         match message.status {
           OrderMessageStatus::Ok => Ok(Async::Ready(message)),
@@ -209,7 +209,7 @@ impl Future for FutureAnswer {
         }
       },
       None => {
-        Ex::register(self.worker_id, &self.message_id, MessageStatus::Other, task::current());
+        Executor::register(self.worker_id, &self.message_id, MessageStatus::Other, task::current());
         Ok(Async::NotReady)
       }
     }
@@ -226,13 +226,13 @@ impl Stream for FutureProcessing {
   type Error = ();
   fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
     //FIXME: handle workers disconnected
-    if Ex::peek_message(self.worker_id, &self.message_id, MessageStatus::Other) {
+    if Executor::peek_message(self.worker_id, &self.message_id, MessageStatus::Other) {
       return Ok(Async::Ready(None));
     } else {
-      Ex::register(self.worker_id, &self.message_id, MessageStatus::Other, task::current());
+      Executor::register(self.worker_id, &self.message_id, MessageStatus::Other, task::current());
     }
 
-    match Ex::get_message(self.worker_id, &self.message_id, MessageStatus::Processing) {
+    match Executor::get_message(self.worker_id, &self.message_id, MessageStatus::Processing) {
       Some(message) => {
         match message.status {
           OrderMessageStatus::Processing => Ok(Async::Ready(Some(message))),
@@ -240,7 +240,7 @@ impl Stream for FutureProcessing {
         }
       },
       None => {
-        Ex::register(self.worker_id, &self.message_id, MessageStatus::Processing, task::current());
+        Executor::register(self.worker_id, &self.message_id, MessageStatus::Processing, task::current());
         Ok(Async::NotReady)
       }
     }
@@ -249,7 +249,7 @@ impl Stream for FutureProcessing {
 
 pub fn send_processing(worker_id: Token, message: OrderMessage) -> (FutureProcessing, FutureAnswer) {
   let message_id = message.id.to_string();
-  Ex::send_worker(worker_id, message);
+  Executor::send_worker(worker_id, message);
   (FutureProcessing {
     worker_id,
     message_id: message_id.clone()
@@ -263,7 +263,7 @@ pub fn send_processing(worker_id: Token, message: OrderMessage) -> (FutureProces
 
 pub fn send(worker_id: Token, message: OrderMessage) -> FutureAnswer {
   let message_id = message.id.to_string();
-  Ex::send_worker(worker_id, message);
+  Executor::send_worker(worker_id, message);
   FutureAnswer {
     worker_id,
     message_id,
@@ -281,14 +281,14 @@ mod tests {
 
   #[test]
   fn executor() {
-    Ex::execute(lazy(||{
+    Executor::execute(lazy(||{
       let (processing, msg_future) = send_processing(Token(0), OrderMessage { id: "test".to_string(), order: Order::Status });
       processing.for_each(|msg| {
         println!("TEST: got processing message: {:?}", msg);
         Ok(())
       }).join(msg_future.map(|msg| {
           println!("TEST: future got msg: {:?}", msg);
-          Ex::send_client(FrontToken(1), ConfigMessageAnswer::new(
+          Executor::send_client(FrontToken(1), ConfigMessageAnswer::new(
             "test".to_string(),
             ConfigMessageStatus::Ok,
             "ok".to_string(),
@@ -299,26 +299,26 @@ mod tests {
         })
       ).map(|_| ())
     }));
-    Ex::run();
+    Executor::run();
 
-    Ex::handle_message(Token(0), OrderMessageAnswer{
+    Executor::handle_message(Token(0), OrderMessageAnswer{
       id: "test".to_string(),
       status: OrderMessageStatus::Processing,
       data: None
     });
 
-    Ex::run();
+    Executor::run();
 
-    Ex::handle_message(Token(0), OrderMessageAnswer{
+    Executor::handle_message(Token(0), OrderMessageAnswer{
       id: "test".to_string(),
       status: OrderMessageStatus::Ok,
       data: None
     });
 
-    Ex::run();
+    Executor::run();
 
     assert_eq!(
-      Ex::get_client_message(),
+      Executor::get_client_message(),
       Some((FrontToken(1),
         ConfigMessageAnswer::new(
           "test".to_string(),

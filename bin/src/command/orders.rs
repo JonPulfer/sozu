@@ -242,11 +242,11 @@ impl CommandServer {
         if counter > 0 {
           info!("state loaded from {}, will start sending {} messages to workers", path, counter);
           let id = message_id.to_string();
-          executor::Ex::execute(
+          executor::Executor::execute(
             //FIXME: join_all will stop at the first error, and we will end up accumulating messages
             join_all(futures).map(move |v| {
               info!("load_state: {} messages loaded", v.len());
-              executor::Ex::send_client(token_opt.unwrap(), ConfigMessageAnswer::new(
+              executor::Executor::send_client(token_opt.unwrap(), ConfigMessageAnswer::new(
                 id,
                 ConfigMessageStatus::Ok,
                 format!("ok: {} messages, error: 0", v.len()),
@@ -402,12 +402,12 @@ impl CommandServer {
       }
       old_worker.run_state = RunState::Stopping;
       let old_worker_token = old_worker.token.expect("worker should have a valid token");
-      executor::Ex::execute(
+      executor::Executor::execute(
         executor::send(
           old_worker_token,
           OrderMessage { id: message_id.to_string(), order: Order::SoftStop })
         .map(move |_| {
-          executor::Ex::stop_worker(old_worker_token)
+          executor::Executor::stop_worker(old_worker_token)
         }).map_err(|s| {
           error!("error stopping worker: {:?}", s);
         })
@@ -483,7 +483,7 @@ impl CommandServer {
       (*metrics.borrow_mut()).dump_process_data()
     });
 
-    executor::Ex::execute(
+    executor::Executor::execute(
       //FIXME: join_all will stop at the first error, and we will end up accumulating messages
       join_all(futures).map(move |v| {
         info!("metrics order: {} workers", &v.len());
@@ -500,7 +500,7 @@ impl CommandServer {
           workers: data,
         };
 
-        executor::Ex::send_client(token, ConfigMessageAnswer::new(
+        executor::Executor::send_client(token, ConfigMessageAnswer::new(
           id,
           ConfigMessageStatus::Ok,
           String::new(),
@@ -542,10 +542,10 @@ impl CommandServer {
       &Query::ApplicationsHashes => {
         let master = QueryAnswer::ApplicationsHashes(self.state.hash_state());
 
-        executor::Ex::execute(f.map(move |mut data| {
+        executor::Executor::execute(f.map(move |mut data| {
           data.insert(String::from("master"), master);
 
-          executor::Ex::send_client(token, ConfigMessageAnswer::new(
+          executor::Executor::send_client(token, ConfigMessageAnswer::new(
             id,
             ConfigMessageStatus::Ok,
             String::new(),
@@ -565,10 +565,10 @@ impl CommandServer {
           }
         };
 
-        executor::Ex::execute(f.map(move |mut data| {
+        executor::Executor::execute(f.map(move |mut data| {
           data.insert(String::from("master"), QueryAnswer::Applications(master));
 
-          executor::Ex::send_client(token, ConfigMessageAnswer::new(
+          executor::Executor::send_client(token, ConfigMessageAnswer::new(
             id,
             ConfigMessageStatus::Ok,
             String::new(),
@@ -625,7 +625,7 @@ impl CommandServer {
           OrderMessage { id: message_id.to_string(), order: order.clone() })
         .map(move |_| {
           if should_stop_worker {
-            executor::Ex::stop_worker(worker_token)
+            executor::Executor::stop_worker(worker_token)
           }
         })
       ));
@@ -642,13 +642,13 @@ impl CommandServer {
     let should_stop_master = proxy_id.is_none();
     let f = join_all(futures).map(move |_| {
       if should_stop_master {
-        executor::Ex::stop_master();
+        executor::Executor::stop_master();
       }
     });
 
-    executor::Ex::execute(
+    executor::Executor::execute(
       f.map(move |_v| {
-        executor::Ex::send_client(token, ConfigMessageAnswer::new(
+        executor::Executor::send_client(token, ConfigMessageAnswer::new(
           id,
           ConfigMessageStatus::Ok,
           String::new(),

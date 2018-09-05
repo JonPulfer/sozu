@@ -28,7 +28,7 @@ pub mod client;
 
 use worker::{start_worker, get_executable_path};
 use self::client::CommandClient;
-use self::executor::{Ex, StateChange};
+use self::executor::{Executor, StateChange};
 
 const SERVER: Token = Token(0);
 const HALF_USIZE: usize = 0x8000000000000000usize;
@@ -334,17 +334,17 @@ impl CommandServer {
   }
 
   pub fn run_executor(&mut self) {
-    Ex::run();
+    Executor::run();
 
-    while let Some((client_token, answer)) = Ex::get_client_message() {
+    while let Some((client_token, answer)) = Executor::get_client_message() {
       self.clients.get_mut(client_token).map(|cl| cl.push_message(answer));
     }
 
-    while let Some((worker_token, message)) = Ex::get_worker_message() {
+    while let Some((worker_token, message)) = Executor::get_worker_message() {
       self.proxies.get_mut(&worker_token).map(|w| w.push_message(message));
     }
 
-    while let Some(state_change) = Ex::get_state_change() {
+    while let Some(state_change) = Executor::get_state_change() {
       match state_change {
         StateChange::StopWorker(token) => {
           self.proxies.get_mut(&token).map(|w| w.run_state = RunState::Stopped);
@@ -519,7 +519,7 @@ impl CommandServer {
   }
 
   fn handle_worker_message(&mut self, token: Token, msg: OrderMessageAnswer) {
-    Ex::handle_message(token, msg);
+    Executor::handle_message(token, msg);
 
     self.run_executor();
   }
