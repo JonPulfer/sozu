@@ -26,7 +26,6 @@ use sozu::network::metrics::METRICS;
 
 use super::{CommandServer,FrontToken,Worker};
 use super::client::parse;
-use super::state::{MessageType,OrderState};
 use worker::{start_worker,get_executable_path};
 use upgrade::{start_new_master_process,SerializedWorker,UpgradeData};
 use util;
@@ -815,7 +814,6 @@ impl CommandServer {
       token_count:     token_count,
 
       //FIXME: deserialize this as well
-      order_state:     OrderState::new(),
       must_stop:       false,
       executable_path: path,
       backends_count:  backends_count,

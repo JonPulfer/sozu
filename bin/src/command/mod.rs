@@ -25,7 +25,6 @@ use sozu_command::scm_socket::{Listeners,ScmSocket};
 pub mod executor;
 pub mod orders;
 pub mod client;
-pub mod state;
 
 use worker::{start_worker, get_executable_path};
 use self::client::CommandClient;
@@ -106,7 +105,6 @@ pub struct CommandServer {
   pub poll:        Poll,
   config:          Config,
   token_count:     usize,
-  order_state:     state::OrderState,
   must_stop:       bool,
   executable_path: String,
   //caching the number of backends instead of going through the whole state.backends hashmap
@@ -188,7 +186,6 @@ impl CommandServer {
       poll:            poll,
       config:          config,
       token_count:     token_count,
-      order_state:     state::OrderState::new(),
       must_stop:       false,
       executable_path: path,
       backends_count:  backends_count,
