@@ -18,6 +18,7 @@ lazy_static! {
       messages: Mutex::new(HashMap::new()),
       worker_queue: Mutex::new(VecDeque::new()),
       client_queue: Mutex::new(VecDeque::new()),
+      state_queue: Mutex::new(VecDeque::new()),
     })
   };
 }
@@ -28,6 +29,7 @@ pub struct Ex {
   pub messages: Mutex<HashMap<(Token, String, MessageStatus), OrderMessageAnswer>>,
   pub worker_queue: Mutex<VecDeque<(Token, OrderMessage)>>,
   pub client_queue: Mutex<VecDeque<(FrontToken, ConfigMessageAnswer)>>,
+  pub state_queue: Mutex<VecDeque<StateChange>>,
 }
 
 pub struct Runner {
@@ -39,6 +41,12 @@ pub struct Runner {
 pub enum MessageStatus {
   Processing,
   Other,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StateChange {
+  StopWorker(Token),
+  StopMaster,
 }
 
 impl Runner {
@@ -98,6 +106,21 @@ impl Ex {
 
   pub fn get_client_message() -> Option<(FrontToken, ConfigMessageAnswer)> {
     let mut queue = EXECUTOR.client_queue.lock().unwrap();
+    queue.pop_front()
+  }
+
+  pub fn stop_worker(worker: Token) {
+    let mut queue = EXECUTOR.state_queue.lock().unwrap();
+    queue.push_back(StateChange::StopWorker(worker));
+  }
+
+  pub fn stop_master() {
+    let mut queue = EXECUTOR.state_queue.lock().unwrap();
+    queue.push_back(StateChange::StopMaster);
+  }
+
+  pub fn get_state_change() -> Option<StateChange> {
+    let mut queue = EXECUTOR.state_queue.lock().unwrap();
     queue.pop_front()
   }
 

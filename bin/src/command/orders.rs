@@ -561,17 +561,8 @@ impl CommandServer {
 
     self.state.handle_order(&order);
 
-    if order == Order::SoftStop || order == Order::HardStop {
-      if proxy_id.is_none() {
-        self.order_state.insert_task(message_id, MessageType::Stop, Some(token));
-      } else {
-        self.order_state.insert_task(message_id, MessageType::StopWorker, Some(token));
-      }
-    } else {
-      self.order_state.insert_task(message_id, MessageType::WorkerOrder, Some(token));
-    }
-
     let mut found = false;
+    let mut futures = Vec::new();
     for ref mut proxy in self.proxies.values_mut()
       .filter(|worker| worker.run_state != RunState::Stopping && worker.run_state != RunState::Stopped) {
 
@@ -581,16 +572,23 @@ impl CommandServer {
         }
       }
 
-      if order == Order::SoftStop || order == Order::HardStop {
+      let worker_token = proxy.token.expect("worker should have a token");
+      let should_stop_worker = order == Order::SoftStop || order == Order::HardStop;
+      if should_stop_worker {
         proxy.run_state = RunState::Stopping;
       }
 
+      futures.push(
+        Box::new(executor::send(
+          worker_token,
+          OrderMessage { id: message_id.to_string(), order: order.clone() })
+        .map(move |_| {
+          if should_stop_worker {
+            executor::Ex::stop_worker(worker_token)
+          }
+        })
+      ));
 
-      self.order_state.insert_worker_message(message_id, message_id, proxy.token.expect("worker should have a valid token"));
-      trace!("sending to {:?}, inflight is now {:#?}", proxy.token.expect("worker should have a valid token").0, self.order_state);
-
-      let o = order.clone();
-      proxy.push_message(OrderMessage { id: String::from(message_id), order: o });
       found = true;
     }
 
@@ -598,6 +596,27 @@ impl CommandServer {
       // FIXME: should send back error here
       error!("no proxy found");
     }
+
+    let id = message_id.to_string();
+    let should_stop_master = proxy_id.is_none();
+    let f = join_all(futures).map(move |_| {
+      if should_stop_master {
+        executor::Ex::stop_master();
+      }
+    });
+
+    executor::Ex::execute(
+      f.map(move |v| {
+        executor::Ex::send_client(token, ConfigMessageAnswer::new(
+          id,
+          ConfigMessageStatus::Ok,
+          String::new(),
+          None
+        ));
+      }).map_err(|e| {
+        error!("load_state error: {}", e);
+      })
+    );
 
     match order {
       Order::AddBackend(_) => self.backends_count += 1,
