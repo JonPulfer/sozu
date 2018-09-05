@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use mio::Token;
 use futures::prelude::*;
 use futures::executor::{Notify, Spawn, spawn};

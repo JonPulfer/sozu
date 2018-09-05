@@ -486,7 +486,6 @@ impl CommandServer {
     executor::Executor::execute(
       //FIXME: join_all will stop at the first error, and we will end up accumulating messages
       join_all(futures).map(move |v| {
-        info!("metrics order: {} workers", &v.len());
         let data: BTreeMap<String, MetricsData> = v.into_iter().filter_map(|(tag, metrics)| {
           if let Some(OrderMessageAnswerData::Metrics(d)) = metrics.data {
             Some((tag, d))
