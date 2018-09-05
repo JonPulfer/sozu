@@ -17,8 +17,10 @@ use nom::{Err,HexDisplay,Offset};
 use sozu_command::buffer::Buffer;
 use sozu_command::channel::Channel;
 use sozu_command::scm_socket::{Listeners, ScmSocket};
-use sozu_command::messages::{Order, OrderMessage, Query, MetricsData, AggregatedMetricsData,OrderMessageAnswerData};
+use sozu_command::messages::{Order, OrderMessage, Query, QueryAnswer, QueryApplicationType,
+MetricsData, AggregatedMetricsData, OrderMessageAnswerData};
 use sozu_command::data::{AnswerData,ConfigCommand,ConfigMessage,ConfigMessageAnswer,ConfigMessageStatus,RunState,WorkerInfo};
+use sozu_command::state::get_application_ids_by_domain;
 use sozu_command::logging;
 use sozu::network::metrics::METRICS;
 
@@ -376,7 +378,7 @@ impl CommandServer {
     }
 
     let mut listeners = None;
-    let old_worker_token = {
+    {
       let old_worker = self.proxies.values_mut().filter(|worker| worker.id == id).next().unwrap();
 
       old_worker.channel.set_blocking(true);
@@ -400,14 +402,18 @@ impl CommandServer {
         }
       }
       old_worker.run_state = RunState::Stopping;
-      old_worker.push_message(OrderMessage { id: String::from(message_id), order: Order::SoftStop });
-
-      old_worker.token.expect("worker should have a valid token")
-    };
-
-    self.order_state.insert_task(message_id, MessageType::StopWorker, Some(token));
-    self.order_state.insert_worker_message(message_id, message_id, old_worker_token);
-    trace!("sending to {:?}, inflight is now {:#?}", old_worker_token.0, self.order_state);
+      let old_worker_token = old_worker.token.expect("worker should have a valid token");
+      executor::Ex::execute(
+        executor::send(
+          old_worker_token,
+          OrderMessage { id: message_id.to_string(), order: Order::SoftStop })
+        .map(move |_| {
+          executor::Ex::stop_worker(old_worker_token)
+        }).map_err(|s| {
+          error!("error stopping worker: {:?}", s);
+        })
+      );
+    }
 
     match listeners {
       Some(l) => {
@@ -508,21 +514,73 @@ impl CommandServer {
   }
 
   pub fn query(&mut self, token: FrontToken, message_id: &str, query: Query) {
-    let message_type = match &query {
-      &Query::ApplicationsHashes          => MessageType::QueryApplicationsHashes,
-      &Query::Applications(ref query_type) => MessageType::QueryApplications(query_type.clone()),
-    };
-
-    self.order_state.insert_task(message_id, message_type, Some(token));
-
+    let id = message_id.to_string();
+    let mut futures = Vec::new();
     for ref mut proxy in self.proxies.values_mut()
       .filter(|worker| worker.run_state != RunState::Stopping && worker.run_state != RunState::Stopped) {
 
-      self.order_state.insert_worker_message(message_id, message_id, proxy.token.expect("worker should have a valid token"));
-      trace!("sending to {:?}, inflight is now {:#?}", proxy.token.expect("worker should have a valid token").0, self.order_state);
+      let tag = proxy.id.to_string();
+      futures.push(
+        executor::send(
+          proxy.token.expect("worker should have a token"),
+          OrderMessage { id: id.clone(), order: Order::Query(query.clone()) }).map(|data| (tag, data))
+      );
 
-      proxy.push_message(OrderMessage { id: String::from(message_id), order: Order::Query(query.clone()) });
     }
+
+    let f = join_all(futures).map(move |v| {
+      let data: BTreeMap<String, QueryAnswer> = v.into_iter().filter_map(|(tag, query)| {
+        if let Some(OrderMessageAnswerData::Query(d)) = query.data {
+          Some((tag, d))
+        } else {
+          None
+        }
+      }).collect();
+      data
+    });
+
+    match &query {
+      &Query::ApplicationsHashes => {
+        let master = QueryAnswer::ApplicationsHashes(self.state.hash_state());
+
+        executor::Ex::execute(f.map(move |mut data| {
+          data.insert(String::from("master"), master);
+
+          executor::Ex::send_client(token, ConfigMessageAnswer::new(
+            id,
+            ConfigMessageStatus::Ok,
+            String::new(),
+            Some(AnswerData::Query(data))
+          ));
+        }).map_err(|e| {
+          //FIXME: send back errors
+          error!("metrics error: {}", e);
+        }));
+      },
+      &Query::Applications(ref query_type) => {
+        let master = match query_type {
+          QueryApplicationType::AppId(ref app_id) => vec!(self.state.application_state(app_id)),
+          QueryApplicationType::Domain(ref domain) => {
+            let app_ids = get_application_ids_by_domain(&self.state, domain.hostname.clone(), domain.path_begin.clone());
+            app_ids.iter().map(|ref app_id| self.state.application_state(app_id)).collect()
+          }
+        };
+
+        executor::Ex::execute(f.map(move |mut data| {
+          data.insert(String::from("master"), QueryAnswer::Applications(master));
+
+          executor::Ex::send_client(token, ConfigMessageAnswer::new(
+            id,
+            ConfigMessageStatus::Ok,
+            String::new(),
+            Some(AnswerData::Query(data))
+          ));
+        }).map_err(|e| {
+          //FIXME: send back errors
+          error!("metrics error: {}", e);
+        }));
+      }
+    };
   }
 
   pub fn worker_order(&mut self, token: FrontToken, message_id: &str, order: Order, proxy_id: Option<u32>) {
