@@ -1,13 +1,13 @@
 use mio::Token;
 use futures::prelude::*;
-use futures::executor::{self, Run, Executor, Notify, Spawn, spawn};
+use futures::executor::{Notify, Spawn, spawn};
 use futures::task::{self, Task};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use slab::Slab;
 use std::collections::{HashSet, VecDeque};
-use sozu_command::messages::{Order, OrderMessage, OrderMessageAnswer, OrderMessageStatus};
-use sozu_command::data::{ConfigMessageAnswer, ConfigMessageStatus};
+use sozu_command::messages::{OrderMessage, OrderMessageAnswer, OrderMessageStatus};
+use sozu_command::data::ConfigMessageAnswer;
 use super::FrontToken;
 
 lazy_static! {
@@ -99,7 +99,6 @@ impl Ex {
   }
 
   pub fn send_client(client: FrontToken, message: ConfigMessageAnswer) {
-    //println!("SENDING CLIENT[{:?}] MESSAGE: {:?}", client, message);
     let mut queue = EXECUTOR.client_queue.lock().unwrap();
     queue.push_back((client, message));
   }
@@ -178,7 +177,7 @@ impl Ex {
 
   pub fn peek_message(worker: Token, message_id: &str, status: MessageStatus) -> bool {
     {
-      let mut messages = EXECUTOR.messages.lock().unwrap();
+      let messages = EXECUTOR.messages.lock().unwrap();
       messages.contains_key(&(worker, message_id.to_string(), status))
     }
   }

@@ -30,7 +30,6 @@ use upgrade::{start_new_master_process,SerializedWorker,UpgradeData};
 use util;
 
 use super::executor;
-use futures::executor::spawn;
 use futures::future::join_all;
 use futures::Future;
 
@@ -156,9 +155,7 @@ impl CommandServer {
         }
       },
       Ok(mut file) => {
-        //let mut data = vec!();
         let mut buffer = Buffer::with_capacity(200000);
-        //self.order_state.insert_task(message_id, MessageType::LoadState, token_opt);
 
         info!("starting to load state from {}", path);
 
@@ -214,9 +211,6 @@ impl CommandServer {
                 for ref mut proxy in self.proxies.values_mut()
                   .filter(|worker| worker.run_state != RunState::Stopping && worker.run_state != RunState::Stopped) {
                   let o = order.clone();
-                  /*proxy.push_message(OrderMessage { id: id.clone(), order: o });
-                  self.order_state.insert_worker_message(message_id, &id, proxy.token.expect("worker should have a token"));
-                  */
                   futures.push(
                     executor::send(proxy.token.expect("worker should have a token"), OrderMessage { id: id.clone(), order: o })
                   );
@@ -248,9 +242,9 @@ impl CommandServer {
           info!("state loaded from {}, will start sending {} messages to workers", path, counter);
           let id = message_id.to_string();
           executor::Ex::execute(
+            //FIXME: join_all will stop at the first error, and we will end up accumulating messages
             join_all(futures).map(move |v| {
               info!("load_state: {} messages loaded", v.len());
-              info!("WILL SEND TO TOKEN: {:?}", token_opt);
               executor::Ex::send_client(token_opt.unwrap(), ConfigMessageAnswer::new(
                 id,
                 ConfigMessageStatus::Ok,
@@ -263,17 +257,14 @@ impl CommandServer {
           );
         } else {
           info!("no messages sent to workers: local state already had those messages");
-          if let Some(_) = self.order_state.state.remove(message_id) {
-            if let Some(token) = token_opt {
-              let answer = ConfigMessageAnswer::new(
-                message_id.to_string(),
-                ConfigMessageStatus::Ok,
-                format!("ok: 0 messages, error: 0"),
-                None
-              );
-              self.clients[token].push_message(answer);
-            }
-
+          if let Some(token) = token_opt {
+            let answer = ConfigMessageAnswer::new(
+              message_id.to_string(),
+              ConfigMessageStatus::Ok,
+              format!("ok: 0 messages, error: 0"),
+              None
+            );
+            self.clients[token].push_message(answer);
           }
         }
 
@@ -471,17 +462,10 @@ impl CommandServer {
   pub fn metrics(&mut self, token: FrontToken, message_id: &str) {
     let mut futures = Vec::new();
     let id = message_id.to_string();
-    //self.order_state.insert_task(message_id, MessageType::Metrics, Some(token));
 
     for ref mut proxy in self.proxies.values_mut()
       .filter(|worker| worker.run_state != RunState::Stopping && worker.run_state != RunState::Stopped) {
 
-      /*
-      self.order_state.insert_worker_message(message_id, message_id, proxy.token.expect("worker should have a valid token"));
-      trace!("sending to {:?}, inflight is now {:#?}", proxy.token.expect("worker should have a valid token").0, self.order_state);
-
-      proxy.push_message(OrderMessage { id: String::from(message_id), order: Order::Metrics });
-      */
       let tag = proxy.id.to_string();
       futures.push(
         executor::send(
@@ -495,9 +479,10 @@ impl CommandServer {
     });
 
     executor::Ex::execute(
+      //FIXME: join_all will stop at the first error, and we will end up accumulating messages
       join_all(futures).map(move |v| {
         info!("metrics order: {} workers", &v.len());
-        let mut data: BTreeMap<String, MetricsData> = v.into_iter().filter_map(|(tag, metrics)| {
+        let data: BTreeMap<String, MetricsData> = v.into_iter().filter_map(|(tag, metrics)| {
           if let Some(OrderMessageAnswerData::Metrics(d)) = metrics.data {
             Some((tag, d))
           } else {
@@ -510,7 +495,6 @@ impl CommandServer {
           workers: data,
         };
 
-        info!("WILL SEND TO TOKEN: {:?}", token);
         executor::Ex::send_client(token, ConfigMessageAnswer::new(
           id,
           ConfigMessageStatus::Ok,
@@ -606,7 +590,7 @@ impl CommandServer {
     });
 
     executor::Ex::execute(
-      f.map(move |v| {
+      f.map(move |_v| {
         executor::Ex::send_client(token, ConfigMessageAnswer::new(
           id,
           ConfigMessageStatus::Ok,
@@ -700,7 +684,6 @@ impl CommandServer {
       state:       state,
       next_id:     self.next_id,
       token_count: self.token_count,
-      //order_state: self.order_state.state.clone(),
     }
   }
 
@@ -713,7 +696,6 @@ impl CommandServer {
       state,
       next_id,
       token_count,
-      //order_state,
     } = upgrade_data;
 
     debug!("listener is: {}", command);

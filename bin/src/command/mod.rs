@@ -19,7 +19,7 @@ use sozu_command::config::Config;
 use sozu_command::channel::Channel;
 use sozu_command::state::ConfigState;
 use sozu_command::data::{ConfigMessage,ConfigMessageAnswer,ConfigMessageStatus,RunState};
-use sozu_command::messages::{OrderMessage,OrderMessageAnswer,OrderMessageStatus};
+use sozu_command::messages::{OrderMessage,OrderMessageAnswer};
 use sozu_command::scm_socket::{Listeners,ScmSocket};
 
 pub mod executor;
@@ -29,7 +29,6 @@ pub mod state;
 
 use worker::{start_worker, get_executable_path};
 use self::client::CommandClient;
-use self::state::MessageType;
 use self::executor::{Ex, StateChange};
 
 const SERVER: Token = Token(0);
