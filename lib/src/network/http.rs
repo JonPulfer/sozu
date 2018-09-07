@@ -18,6 +18,7 @@ use rand::random;
 use time::{SteadyTime,Duration};
 use slab::{Entry,VacantEntry,Slab};
 use mio_extras::timer::{Timer, Timeout};
+use backtrace::Backtrace;
 
 use sozu_command::channel::Channel;
 use sozu_command::state::ConfigState;
@@ -71,6 +72,7 @@ pub struct Client {
   last_event:         SteadyTime,
   pub listen_token:   Token,
   connection_attempt: u8,
+  closed: bool,
 }
 
 impl Client {
@@ -103,6 +105,7 @@ impl Client {
         last_event:         SteadyTime::now(),
         listen_token,
         connection_attempt: 0,
+        closed: false,
       };
 
       client.front_readiness().interest = UnixReady::from(Ready::readable()) | UnixReady::hup() | UnixReady::error();
@@ -438,6 +441,7 @@ impl ProxyClient for Client {
       None => {},
     }
 
+    self.closed = true;
     result.tokens.push(self.frontend_token);
 
     result
@@ -665,6 +669,17 @@ impl ProxyClient for Client {
     }
 
     v
+  }
+}
+
+impl Drop for Client {
+  fn drop(&mut self) {
+    if !self.closed {
+      error!("HTTP Client {:?} close() method was not called before being dropped", self.frontend_token);
+      self.print_state();
+      let bt = Backtrace::new();
+      error!("backtrace:\n{:?}", bt);
+    }
   }
 }
 

@@ -177,6 +177,7 @@ extern crate mio_extras;
 #[cfg(test)]
 #[macro_use]
 extern crate quickcheck;
+extern crate backtrace;
 
 #[macro_use] pub mod util;
 #[macro_use] pub mod network;

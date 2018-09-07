@@ -58,6 +58,7 @@ use network::retry::RetryPolicy;
 use network::tcp;
 use util::UnwrapLog;
 use network::https_rustls;
+use backtrace::Backtrace;
 
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub struct TlsApp {
@@ -89,6 +90,7 @@ pub struct TlsClient {
   last_event:         SteadyTime,
   pub listen_token:   Token,
   connection_attempt: u8,
+  pub closed:         bool,
 }
 
 impl TlsClient {
@@ -118,6 +120,7 @@ impl TlsClient {
       last_event:         SteadyTime::now(),
       listen_token,
       connection_attempt: 0,
+      closed:             false,
     };
     client.front_readiness().interest = UnixReady::from(Ready::readable()) | UnixReady::hup() | UnixReady::error();
 
@@ -424,6 +427,17 @@ impl TlsClient {
   }
 }
 
+impl Drop for TlsClient {
+  fn drop(&mut self) {
+    if !self.closed {
+      error!("TLsClient {:?} close() method was not called before being dropped", self.frontend_token);
+      self.print_state();
+      let bt = Backtrace::new();
+      error!("backtrace:\n{:?}", bt);
+    }
+  }
+}
+
 impl ProxyClient for TlsClient {
 
   fn close(&mut self, poll: &mut Poll) -> CloseResult {
@@ -474,6 +488,7 @@ impl ProxyClient for TlsClient {
       None => {}
     }
 
+    self.closed = true;
     result.tokens.push(self.frontend_token);
 
     result

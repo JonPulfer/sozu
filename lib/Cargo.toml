@@ -41,6 +41,7 @@ hdrhistogram = "^6.0"
 sozu-command-lib = { version = "^0.8", path = "../command" }
 idna = "^0.1"
 mio-extras = "^2.0"
+backtrace = "^0.3"
 
 [dev-dependencies]
 tiny_http = "^0.6"
