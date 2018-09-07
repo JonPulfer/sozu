@@ -363,6 +363,21 @@ impl Server {
       self.handle_remaining_readiness();
       self.create_clients();
 
+      {
+        let mut frontend_tokens: HashSet<Token> = HashSet::new();
+        let mut backend_tokens: HashSet<Token> = HashSet::new();
+
+        for client in self.clients.iter() {
+          let t = client.borrow().tokens();
+          t.get(0).map(|tk| frontend_tokens.insert(*tk));
+          t.get(1).map(|tk| backend_tokens.insert(*tk));
+        }
+
+        gauge!("debug.client.connections", frontend_tokens.len());
+        gauge!("debug.backend.connections", backend_tokens.len());
+
+      }
+
       let now = SteadyTime::now();
       if now - last_zombie_check > self.zombie_check_interval {
         info!("zombie check");
@@ -782,6 +797,8 @@ impl Server {
       assert!(self.nb_connections != 0);
       self.nb_connections -= 1;
       gauge!("client.connections", self.nb_connections);
+    } else {
+      info!("close_client({:?}) could not find client in slab", token);
     }
 
     // do not be ready to accept right away, wait until we get back to 10% capacity
@@ -853,7 +870,7 @@ impl Server {
     }
 
     //FIXME: we must handle separately the client limit since the clients slab also has entries for listeners and backends
-    match self.clients.vacant_entry() {
+    let res = match self.clients.vacant_entry() {
       None => {
         error!("not enough memory to accept another client, flushing the accept queue");
         error!("nb_connections: {}, max_connections: {}", self.nb_connections, self.max_connections);
@@ -887,7 +904,9 @@ impl Server {
           }
         }
       }
-    }
+    };
+    info!("create_client http slab count: {}, client connections: {}", self.clients.len(), self.nb_connections);
+    res
   }
 
   pub fn create_client_https(&mut self, token: ListenToken, socket: TcpStream) -> bool {
