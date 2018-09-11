@@ -61,6 +61,7 @@ impl BackendMap {
     if let Some(ref mut app_backends) = self.backends.get_mut(app_id) {
       if app_backends.backends.is_empty() {
         self.available = false;
+        incr!("http.503.errors.app_id.none_available");
         return Err(ConnectionError::NoBackendAvailable);
       }
 
@@ -87,10 +88,11 @@ impl BackendMap {
           error!("no more available backends for app {}", app_id);
           self.available = false;
         }
+        incr!("http.503.errors.app_id.no_next_available_backend");
         return Err(ConnectionError::NoBackendAvailable);
       }
-      Err(ConnectionError::NoBackendAvailable)
     } else {
+      incr!("http.503.errors.app_id.no_backends");
       Err(ConnectionError::NoBackendAvailable)
     }
   }
@@ -114,6 +116,7 @@ impl BackendMap {
       return res;
     } else {
       debug!("Couldn't find a backend corresponding to sticky_session {} for app {}", sticky_session, app_id);
+      incr!("http.503.errors.sticky_not_found");
       return self.backend_from_app_id(app_id);
     }
   }

@@ -770,8 +770,6 @@ impl ServerConfiguration {
 
     match self.backends.backend_from_app_id(app_id) {
       Err(e) => {
-        let answer = self.listeners[&client.listen_token].answers.ServiceUnavailable.clone();
-        client.set_answer(DefaultAnswerStatus::Answer503, answer);
         Err(e)
       },
       Ok((backend, conn))  => {
@@ -798,9 +796,6 @@ impl ServerConfiguration {
 
     match self.backends.backend_from_sticky_session(app_id, &sticky_session) {
       Err(e) => {
-        debug!("Couldn't find a backend corresponding to sticky_session {} for app {}", sticky_session, app_id);
-        let answer = self.listeners[&client.listen_token].answers.ServiceUnavailable.clone();
-        client.set_answer(DefaultAnswerStatus::Answer503, answer);
         Err(e)
       },
       Ok((backend, conn))  => {
