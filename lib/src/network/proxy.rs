@@ -378,48 +378,63 @@ impl Server {
 
       }
 
-      let now = SteadyTime::now();
-      if now - last_zombie_check > self.zombie_check_interval {
-        info!("zombie check");
-        last_zombie_check = now;
+      {
+        let now = SteadyTime::now();
+        if now - last_zombie_check > self.zombie_check_interval {
+          info!("zombie check");
+          last_zombie_check = now;
 
-        let mut tokens = HashSet::new();
-        let mut frontend_tokens = HashSet::new();
+          let mut tokens = HashSet::new();
+          let mut frontend_tokens = HashSet::new();
 
-        let mut count = 0;
-        let duration = self.zombie_check_interval.clone();
-        for client in self.clients.iter_mut().filter(|c| {
-          now - c.borrow().last_event() > duration
-        }) {
-          let t = client.borrow().tokens();
-          if !frontend_tokens.contains(&t[0]) {
-            client.borrow().print_state();
+          let mut count = 0;
+          let duration = self.zombie_check_interval.clone();
+          for i in 0..(10+2*self.max_connections) {
+            if let Some(ref client) = self.clients.get(ClientToken(i)) {
+              if now - client.borrow().last_event() > duration {
+                let t = client.borrow().tokens();
+                info!("zombie check: will print state for client at {:?} with tokens: {:?}", Token(i), t);
+                if !t.contains(&Token(i)) {
+                  info!("invalid token for zombie, closing now");
+                  client.borrow().print_state();
+                  frontend_tokens.insert(Token(i));
+                  count += 1;
+                } else {
+                  if !frontend_tokens.contains(&t[0]) {
+                    client.borrow().print_state();
 
-            frontend_tokens.insert(t[0]);
-            for tk in t.into_iter() {
-              tokens.insert(tk);
-            }
+                    frontend_tokens.insert(t[0]);
+                    for tk in t.into_iter() {
+                      tokens.insert(tk);
+                    }
 
-            count += 1;
-          }
-        }
-
-        for tk in frontend_tokens.iter() {
-          let cl = self.to_client(*tk);
-          self.close_client(cl);
-        }
-
-        if count > 0 {
-          count!("zombies", count);
-
-          let mut remaining = 0;
-          for tk in tokens.into_iter() {
-            let cl = self.to_client(tk);
-            if self.clients.remove(cl).is_some() {
-              remaining += 1;
+                    count += 1;
+                  }
+                }
+              }
             }
           }
-          info!("removing {} zombies ({} remaining tokens after close)", count, remaining);
+
+          for tk in frontend_tokens.iter() {
+            info!("zombie check: removing client at {:?}", tk);
+            let cl = self.to_client(*tk);
+            self.close_client(cl);
+          }
+
+          if count > 0 {
+            count!("zombies", count);
+
+            let mut remaining = 0;
+            for tk in tokens.into_iter() {
+              info!("checking if client at {:?} still exists", tk);
+              let cl = self.to_client(tk);
+              if self.clients.remove(cl).is_some() {
+                info!("client at {:?} still existed", tk);
+                remaining += 1;
+              }
+            }
+            info!("removing {} zombies ({} remaining tokens after close)", count, remaining);
+          }
         }
       }
 

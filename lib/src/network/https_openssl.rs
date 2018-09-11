@@ -713,8 +713,8 @@ impl ProxyClient for TlsClient {
       _ => None,
     };
 
-    error!("zombie client[{:?} => {:?}], state => readiness: {:?} -> {:?}, protocol: {}, app_id: {:?}, back_connected: {:?}, metrics: {:?}",
-      self.frontend_token, self.back_token(), rf, rb, p, self.app_id, self.back_connected, self.metrics);
+    error!("zombie client[{:?} => {:?}], state => readiness: {:?} -> {:?}, protocol: {}, app_id: {:?}, last_event: {:?}, back_connected: {:?}, metrics: {:?}",
+      self.frontend_token, self.back_token(), rf, rb, p, self.app_id, self.last_event, self.back_connected, self.metrics);
   }
 
   fn tokens(&self) -> Vec<Token> {
