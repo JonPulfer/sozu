@@ -1142,11 +1142,12 @@ impl Server {
     match order {
       ClientResult::CloseClient     => self.close_client(token),
       ClientResult::CloseBackend(opt) => {
-        if let Some(token) = opt {
-          let cl = self.to_client(token);
+        info!("{:?} got CloseBackend({:?})", token, opt);
+        if let Some(backend_token) = opt {
+          let cl = self.to_client(backend_token);
           if let Some(client) = self.clients.remove(cl) {
             let protocol = client.borrow().protocol();
-            let res = client.borrow_mut().close_backend(token, &mut self.poll);
+            let res = client.borrow_mut().close_backend(backend_token, &mut self.poll);
             if let Some((app_id, address)) = res {
               match protocol {
                 Protocol::TCP   => {
@@ -1163,13 +1164,31 @@ impl Server {
                 }
               };
             }
+          } else {
+            error!("client at token({:?}) returned ClientResult::CloseBackend(Some({:?})) but backend was not found",
+              token, backend_token);
+            self.clients[token].borrow().print_state();
           }
+        } else {
+          error!("client at token({:?}) returned ClientResult::CloseBackend(None)", token);
+          self.clients[token].borrow().print_state();
         }
       },
       ClientResult::ReconnectBackend(main_token, backend_token)  => {
+        info!("{:?} got ReconnectBackend({:?}, {:?})", token, main_token, backend_token);
         if let Some(t) = backend_token {
           let cl = self.to_client(t);
-          let _ = self.clients.remove(cl);
+          let res = self.clients.remove(cl);
+          if res.is_none() {
+            error!("client at token({:?}) returned ClientResult::ReconnectBackend({:?}, {:?})) but backend was not found",
+              token, main_token,
+              backend_token);
+            self.clients[token].borrow().print_state();
+          }
+        } else {
+          error!("client at token({:?}) returned ClientResult::ReconnectBackend({:?}, {:?}))", token, main_token,
+            backend_token);
+          self.clients[token].borrow().print_state();
         }
 
         if let Some(t) = main_token {

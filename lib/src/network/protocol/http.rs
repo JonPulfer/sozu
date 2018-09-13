@@ -109,7 +109,7 @@ impl<Front:SocketHandler> Http<Front> {
 
   pub fn reset(&mut self) {
     let request_id = Uuid::new_v4().hyphenated().to_string();
-    //info!("{} RESET TO {}", self.log_ctx, request_id);
+    //info!("{} [{:?} -> {:?}] RESET TO {}", self.log_ctx, self.frontend_token, self.backend_token, request_id);
     gauge_add!("http.active_requests", -1);
     self.state.as_mut().map(|state| state.reset());
     let req_header = self.added_request_header(self.public_address, self.client_address);
