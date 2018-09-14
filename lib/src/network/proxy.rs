@@ -112,6 +112,7 @@ pub struct Server {
   zombie_check_interval: time::Duration,
   accept_queue:    VecDeque<(TcpStream, ListenToken, Protocol, SteadyTime)>,
   accept_queue_timeout: time::Duration,
+  base_clients_count: usize,
 }
 
 impl Server {
@@ -180,6 +181,8 @@ impl Server {
       }
     });
 
+    let base_clients_count = clients.len();
+
     let mut server = Server {
       poll,
       shutting_down:   None,
@@ -202,6 +205,7 @@ impl Server {
       zombie_check_interval: time::Duration::seconds(i64::from(zombie_check_interval)),
       accept_queue:    VecDeque::new(),
       accept_queue_timeout: time::Duration::seconds(i64::from(accept_queue_timeout)),
+      base_clients_count,
     };
 
     // initialize the worker with the state we got from a file
@@ -452,11 +456,16 @@ impl Server {
       });
 
       if self.shutting_down.is_some() {
-        info!("last client stopped, shutting down!");
-        self.channel.run();
-        self.channel.set_blocking(true);
-        self.channel.write_message(&OrderMessageAnswer{ id: self.shutting_down.take().expect("should have shut down correctly"), status: OrderMessageStatus::Ok, data: None});
-        return;
+        if self.clients.len() <= self.base_clients_count {
+          info!("last client stopped, shutting down!");
+          self.channel.run();
+          self.channel.set_blocking(true);
+          self.channel.write_message(&OrderMessageAnswer{ id: self.shutting_down.take().expect("should have shut down correctly"), status: OrderMessageStatus::Ok, data: None});
+          return;
+        } else {
+          info!("shutting down, {} slab elements remaining (base: {})",
+            self.clients.len() - self.base_clients_count, self.base_clients_count);
+        }
       }
     }
   }
@@ -553,6 +562,7 @@ impl Server {
           let front = listener.front.clone();
           let status = if let Some(token) = self.http.add_listener(listener.clone(), self.pool.clone(), token) {
             entry.insert(Rc::new(RefCell::new(ListenClient { protocol: Protocol::HTTPListen })));
+            self.base_clients_count += 1;
             OrderMessageStatus::Ok
           } else {
             error!("Couldn't add HTTP listener");
@@ -565,6 +575,7 @@ impl Server {
         OrderMessage { ref id, order: Order::RemoveListener(ref remove) } => {
           if remove.proxy == ListenerType::HTTP {
             debug!("{} remove http listener {:?}", id, remove);
+            self.base_clients_count -= 1;
             self.queue.push_back(self.http.notify(&mut self.poll, OrderMessage {
               id: id.to_string(),
               order: Order::RemoveListener(remove.clone())
@@ -628,6 +639,7 @@ impl Server {
           let front = listener.front.clone();
           let status = if let Some(token) = self.https.add_listener(listener.clone(), self.pool.clone(), token) {
             entry.insert(Rc::new(RefCell::new(ListenClient { protocol: Protocol::HTTPSListen })));
+            self.base_clients_count += 1;
             OrderMessageStatus::Ok
           } else {
             error!("Couldn't add HTTPS listener");
@@ -640,6 +652,7 @@ impl Server {
         OrderMessage { ref id, order: Order::RemoveListener(ref remove) } => {
           if remove.proxy == ListenerType::HTTPS {
             debug!("{} remove https listener {:?}", id, remove);
+            self.base_clients_count -= 1;
             self.queue.push_back(self.https.notify(&mut self.poll, OrderMessage {
               id: id.to_string(),
               order: Order::RemoveListener(remove.clone())
@@ -703,6 +716,7 @@ impl Server {
           let front = listener.front.clone();
           let status = if let Some(token) = self.tcp.add_listener(listener.clone(), self.pool.clone(), token) {
             entry.insert(Rc::new(RefCell::new(ListenClient { protocol: Protocol::TCPListen })));
+            self.base_clients_count += 1;
             OrderMessageStatus::Ok
           } else {
             error!("Couldn't add TCP listener");
@@ -714,6 +728,7 @@ impl Server {
         OrderMessage { ref id, order: Order::RemoveListener(ref remove) } => {
           if remove.proxy == ListenerType::TCP {
             debug!("{} remove tcp listener {:?}", id, remove);
+            self.base_clients_count -= 1;
             self.queue.push_back(self.tcp.notify(&mut self.poll, OrderMessage {
               id: id.to_string(),
               order: Order::RemoveListener(remove.clone())
