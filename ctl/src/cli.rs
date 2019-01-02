@@ -1,4 +1,5 @@
 use sozu_command::config::LoadBalancingAlgorithms;
+use std::net::SocketAddr;
 
 #[derive(StructOpt, PartialEq, Debug)]
 pub struct App {
@@ -12,10 +13,12 @@ pub struct App {
 
 #[derive(StructOpt, PartialEq, Debug)]
 pub enum SubCmd {
-  #[structopt(name = "shutdown", about = "shuts down the proxy without waiting for connections to finish")]
+  #[structopt(name = "shutdown", about = "shuts down the proxy")]
   Shutdown {
-    #[structopt(long = "hard")]
-    hard: bool
+    #[structopt(long = "hard", help = "do not wait for connections to finish")]
+    hard: bool,
+    #[structopt(short = "w", long = "worker", help = "shuts down the worker with this id")]
+    worker: Option<u32>,
   },
   #[structopt(name = "upgrade", about = "upgrade the proxy")]
   Upgrade {
@@ -68,7 +71,14 @@ pub enum SubCmd {
     json: bool,
     #[structopt(subcommand)]
     cmd: QueryCmd,
-  }
+  },
+  #[structopt(name = "config", about = "configuration file management")]
+  Config {
+    #[structopt(subcommand)]
+    cmd: ConfigCmd
+  },
+  #[structopt(name = "events", about = "receive sozu events")]
+  Events
 }
 
 #[derive(StructOpt, PartialEq, Debug)]
@@ -83,7 +93,7 @@ pub enum StateCmd {
     #[structopt(short = "f", long = "file")]
     file: String,
   },
-  #[structopt(name = "dump")]
+  #[structopt(name = "dump", about = "Dump current state to STDOUT")]
   Dump {
     #[structopt(short = "j", long = "json", help = "Print the command result in JSON format")]
     json: bool
@@ -92,12 +102,12 @@ pub enum StateCmd {
 
 #[derive(StructOpt, PartialEq, Debug)]
 pub enum ApplicationCmd {
-  #[structopt(name = "remove")]
+  #[structopt(name = "remove", about = "Remove an application")]
   Remove {
     #[structopt(short = "i", long = "id")]
     id: String,
   },
-  #[structopt(name = "add")]
+  #[structopt(name = "add", about = "Add an application")]
   Add{
     #[structopt(short = "i", long = "id")]
     id: String,
@@ -109,34 +119,30 @@ pub enum ApplicationCmd {
     send_proxy: bool,
     #[structopt(long = "expect-proxy", help = "Configures the client-facing connection to receive a PROXY protocol header version 2")]
     expect_proxy: bool,
-    #[structopt(long = "load-balancing-policy", help = "Configures the load balancing policy")]
+    #[structopt(long = "load-balancing-policy", help = "Configures the load balancing policy. Possible values are 'roundrobin', 'random' or 'leastconnections'")]
     load_balancing_policy: LoadBalancingAlgorithms,
   },
 }
 
 #[derive(StructOpt, PartialEq, Debug)]
 pub enum BackendCmd {
-  #[structopt(name = "remove")]
+  #[structopt(name = "remove", about = "Remove a backend")]
   Remove {
     #[structopt(short = "i", long = "id")]
     id: String,
     #[structopt(long = "backend-id")]
     backend_id: String,
-    #[structopt(long = "ip")]
-    ip: String,
-    #[structopt(short = "p", long = "port")]
-    port: u16,
+    #[structopt(short = "a", long = "address", help = "server address, format: IP:port")]
+    address: SocketAddr,
   },
-  #[structopt(name = "add")]
+  #[structopt(name = "add", about = "Add a backend")]
   Add {
     #[structopt(short = "i", long = "id")]
     id: String,
     #[structopt(long = "backend-id")]
     backend_id: String,
-    #[structopt(long = "ip")]
-    ip: String,
-    #[structopt(short = "p", long = "port")]
-    port: u16,
+    #[structopt(short = "a", long = "address", help = "server address, format: IP:port")]
+    address: SocketAddr,
     #[structopt(short = "s", long = "sticky-id", help = "value for the sticky session cookie")]
     sticky_id: Option<String>,
     #[structopt(short = "b", long = "backup", help = "set backend as a backup backend")]
@@ -146,8 +152,13 @@ pub enum BackendCmd {
 
 #[derive(StructOpt, PartialEq, Debug)]
 pub enum FrontendCmd {
-  #[structopt(name = "http", about = "HTTP/HTTPS frontend management")]
+  #[structopt(name = "http", about = "HTTP frontend management")]
   Http {
+    #[structopt(subcommand)]
+    cmd: HttpFrontendCmd,
+  },
+  #[structopt(name = "https", about = "HTTPS frontend management")]
+  Https {
     #[structopt(subcommand)]
     cmd: HttpFrontendCmd,
   },
@@ -162,33 +173,25 @@ pub enum FrontendCmd {
 pub enum HttpFrontendCmd {
   #[structopt(name = "add")]
   Add {
-    #[structopt(long = "listener-ip")]
-    listener_ip: String,
-    #[structopt(long = "listener-port")]
-    listener_port: u16,
+    #[structopt(short = "a", long = "address", help = "frontend address, format: IP:port")]
+    address: SocketAddr,
     #[structopt(short = "i", long = "id", help = "app id of the frontend")]
     id: String,
     #[structopt(short = "host", long = "hostname")]
     hostname: String,
     #[structopt(short = "p", long = "path", help="URL prefix of the frontend")]
     path_begin: Option<String>,
-    #[structopt(long = "certificate", help="path to a certificate file")]
-    path_to_certificate: Option<String>,
   },
   #[structopt(name = "remove")]
   Remove {
-    #[structopt(long = "listener-ip")]
-    listener_ip: String,
-    #[structopt(long = "listener-port")]
-    listener_port: u16,
+    #[structopt(short = "a", long = "address", help = "frontend address, format: IP:port")]
+    address: SocketAddr,
     #[structopt(short = "i", long = "id", help = "app id of the frontend")]
     id: String,
     #[structopt(short = "host", long = "hostname")]
     hostname: String,
     #[structopt(short = "p", long = "path", help="URL prefix of the frontend")]
     path_begin: Option<String>,
-    #[structopt(long = "certificate", help="path to a certificate file")]
-    path_to_certificate: Option<String>,
   },
 }
 
@@ -198,58 +201,48 @@ pub enum TcpFrontendCmd {
   Add {
     #[structopt(short = "i", long = "id", help = "app id of the frontend")]
     id: String,
-    #[structopt(long = "ip", help = "IP address of the frontend")]
-    ip_address: String,
-    #[structopt(short = "p", long = "port", help="TCP port of the frontend")]
-    port: u16,
+    #[structopt(short = "a", long = "address", help = "frontend address, format: IP:port")]
+    address: SocketAddr,
   },
   #[structopt(name = "remove")]
   Remove {
     #[structopt(short = "i", long = "id", help = "app id of the frontend")]
     id: String,
-    #[structopt(long = "ip", help = "IP address of the frontend")]
-    ip_address: String,
-    #[structopt(short = "p", long = "port", help="TCP port of the frontend")]
-    port: u16,
+    #[structopt(short = "a", long = "address", help = "frontend address, format: IP:port")]
+    address: SocketAddr,
   },
 }
 
 #[derive(StructOpt, PartialEq, Debug)]
 pub enum CertificateCmd {
-  #[structopt(name = "add")]
+  #[structopt(name = "add", about = "Add a certificate")]
   Add {
-    #[structopt(short = "i", long = "listener-ip")]
-    listener_ip: String,
-    #[structopt(short = "p", long = "listener-port")]
-    listener_port: u16,
+    #[structopt(short = "a", long = "address", help = "listener address, format: IP:port")]
+    address: SocketAddr,
     #[structopt(long = "certificate", help = "path to the certificate")]
     certificate: String,
     #[structopt(long = "certificate-chain", help = "path to the certificate chain")]
     chain: String,
     #[structopt(long = "key", help = "path to the key")]
-    key: Option<String>,
+    key: String,
   },
-  #[structopt(name = "remove")]
+  #[structopt(name = "remove", about = "Remove a certificate")]
   Remove {
-    #[structopt(short = "i", long = "listener-ip")]
-    listener_ip: String,
-    #[structopt(short = "p", long = "listener-port")]
-    listener_port: u16,
+    #[structopt(short = "a", long = "address", help = "listener address, format: IP:port")]
+    address: SocketAddr,
     #[structopt(short = "cert", long = "certificate", help = "path to the certificate")]
     certificate: String,
   },
-  #[structopt(name = "replace")]
+  #[structopt(name = "replace", about = "Replace an existing certificate")]
   Replace {
-    #[structopt(short = "i", long = "listener-ip")]
-    listener_ip: String,
-    #[structopt(short = "p", long = "listener-port")]
-    listener_port: u16,
+    #[structopt(short = "a", long = "address", help = "listener address, format: IP:port")]
+    address: SocketAddr,
     #[structopt(long = "new-certificate", help = "path to the new certificate")]
     certificate: String,
     #[structopt(long = "new-certificate-chain", help = "path to the new certificate chain")]
     chain: String,
     #[structopt(long = "new-key", help = "path to the new key")]
-    key: Option<String>,
+    key: String,
     #[structopt(short = "old-cert", long = "old-certificate", help = "path to the old certificate")]
     old_certificate: String,
   }
@@ -257,11 +250,17 @@ pub enum CertificateCmd {
 
 #[derive(StructOpt, PartialEq, Debug)]
 pub enum QueryCmd {
-  #[structopt(name = "applications")]
+  #[structopt(name = "applications", about = "Query applications matching a specific filter")]
   Applications {
     #[structopt(short = "i", long="id", help="application identifier")]
     id: Option<String>,
     #[structopt(short = "d", long="domain", help="application domain name")]
     domain: Option<String>
   }
+}
+
+#[derive(StructOpt, PartialEq, Debug)]
+pub enum ConfigCmd {
+  #[structopt(name = "check", about = "check configuration file syntax and exit")]
+  Check {}
 }

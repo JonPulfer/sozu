@@ -11,10 +11,10 @@ use serde_json;
 use tempfile::tempfile;
 
 use sozu_command::config::Config;
-use sozu_command::data::RunState;
+use sozu_command::command::RunState;
 use sozu_command::channel::Channel;
 use sozu_command::state::ConfigState;
-use sozu_command::messages::OrderMessage;
+use sozu_command::proxy::ProxyRequest;
 
 use util;
 use command::{CommandServer,Worker};
@@ -26,20 +26,20 @@ pub struct SerializedWorker {
   pub id:         u32,
   pub run_state:  RunState,
   pub token:      Option<usize>,
-  pub queue:      Vec<OrderMessage>,
+  pub queue:      Vec<ProxyRequest>,
   pub scm:        i32,
 }
 
 impl SerializedWorker {
-  pub fn from_proxy(proxy: &Worker) -> SerializedWorker {
+  pub fn from_worker(worker: &Worker) -> SerializedWorker {
     SerializedWorker {
-      fd:         proxy.channel.sock.as_raw_fd(),
-      pid:        proxy.pid,
-      id:         proxy.id,
-      run_state:  proxy.run_state.clone(),
-      token:      proxy.token.clone().map(|Token(t)| t),
-      queue:      proxy.queue.clone().into(),
-      scm:        proxy.scm.raw_fd(),
+      fd:         worker.channel.sock.as_raw_fd(),
+      pid:        worker.pid,
+      id:         worker.id,
+      run_state:  worker.run_state.clone(),
+      token:      worker.token.clone().map(|Token(t)| t),
+      queue:      worker.queue.clone().into(),
+      scm:        worker.scm.raw_fd(),
     }
   }
 }
@@ -53,7 +53,6 @@ pub struct UpgradeData {
   pub state:       ConfigState,
   pub next_id:     u32,
   pub token_count: usize,
-  //pub order_state: HashMap<String, HashSet<usize>>,
 }
 
 pub fn start_new_master_process(executable_path: String, upgrade_data: UpgradeData) -> (pid_t, Channel<(),bool>) {

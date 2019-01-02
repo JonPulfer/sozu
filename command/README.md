@@ -11,14 +11,14 @@ The messages are sent as JSON messages, separated by the 0 byte.
 All messages contain an identifier which will be used to match the proxy's
 response to the order, and a type, to decide how to parse the message.
 
-You send a `ConfigMessage`, defined as follows:
+You send a `CommandRequest`, defined as follows:
 
 ```rust
-pub struct ConfigMessage {
-  pub id:       String,
-  pub version:  u8,
-  pub data:     ConfigCommand,
-  pub proxy_id: Option<String>,
+pub struct CommandRequest {
+  pub id:        String,
+  pub version:   u8,
+  pub data:      CommandRequestData,
+  pub worker_id: Option<String>,
 }
 ```
 
@@ -26,26 +26,26 @@ When serialized to JSON it looks like this:
 
 ```json
 {
-  "id":       "ID_TEST",
-  "version":  0,
-  "proxy_id": 0,
-  "type":     "<ConfigCommand enum name>",
-  "data":     { <ConfigCommand data> }
+    "id":        "ID_TEST",
+    "version":   0,
+    "worker_id": 0,
+    "type":      "<CommandRequestData enum name>",
+    "data":      { <CommandRequestData wrapped value> }
 }"
 ```
 
 The type indicates which kind of message it wraps. The id field will be used
 for answers. Since the protocol is asynchronous, this is used to identify
 answers to a specific message (you can receive multiple answers to one message).
-The `proxy_id` field is used to target a specific worker.
+The `worker_id` field is used to target a specific worker.
 
-An answer has the format `ConfigMessageAnswer`, defined as follows:
+An answer has the format `CommandResponse`, defined as follows:
 
 ```rust
-pub struct ConfigMessageAnswer {
+pub struct CommandResponse {
   pub id:      String,
   pub version: u8,
-  pub status:  ConfigMessageStatus,
+  pub status:  CommandStatus,
   pub message: String
 }
 ```

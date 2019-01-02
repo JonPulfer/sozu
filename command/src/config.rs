@@ -8,14 +8,14 @@ use std::net::SocketAddr;
 use std::collections::{HashMap,HashSet};
 use std::io::{self,Error,ErrorKind,Read};
 
-use certificate::{calculate_fingerprint,split_certificate_chain};
+use certificate::split_certificate_chain;
 use toml;
 
-use messages::{CertFingerprint,CertificateAndKey,Order,HttpFront,HttpsFront,TcpFront,Backend,
+use proxy::{CertificateAndKey,ProxyRequestData,HttpFront,TcpFront,Backend,
   HttpListener,HttpsListener,TcpListener,AddCertificate,TlsProvider,LoadBalancingParams,
   Application, TlsVersion,ActivateListener,ListenerType};
 
-use data::{ConfigCommand,ConfigMessage,PROTOCOL_VERSION};
+use command::{CommandRequestData,CommandRequest,PROTOCOL_VERSION};
 
 
 #[derive(Debug,Clone,PartialEq,Eq,Hash,Serialize,Deserialize)]
@@ -23,7 +23,7 @@ use data::{ConfigCommand,ConfigMessage,PROTOCOL_VERSION};
 pub struct Listener {
   pub address:            SocketAddr,
   pub protocol:           FileListenerProtocolConfig,
-  pub public_address:     Option<String>,
+  pub public_address:     Option<SocketAddr>,
   pub answer_404:         Option<String>,
   pub answer_503:         Option<String>,
   pub cipher_list:        Option<String>,
@@ -73,13 +73,12 @@ impl Listener {
       }
     };
     */
-    let public_address = self.public_address.as_ref().and_then(|addr| FromStr::from_str(&addr).ok());
     let http_proxy_configuration = Some(self.address);
 
     http_proxy_configuration.map(|addr| {
       let mut configuration = HttpListener {
         front:          addr,
-        public_address,
+        public_address: self.public_address,
         expect_proxy:   self.expect_proxy.unwrap_or(false),
         sticky_name:    self.sticky_name.clone(),
         ..Default::default()
@@ -110,7 +109,6 @@ impl Listener {
       return None;
     }
 
-    let public_address     = self.public_address.as_ref().and_then(|addr| FromStr::from_str(&addr).ok());
     let cipher_list:String = self.cipher_list.clone().unwrap_or_else(||
       String::from(
         "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:\
@@ -160,7 +158,7 @@ impl Listener {
       let mut configuration = HttpsListener {
         front:           addr,
         sticky_name:     self.sticky_name.clone(),
-        public_address,
+        public_address:  self.public_address,
         cipher_list,
         versions,
         expect_proxy,
@@ -196,7 +194,6 @@ impl Listener {
     address.push_str(&self.port.to_string());
     */
 
-    let public_address = self.public_address.as_ref().and_then(|addr| FromStr::from_str(&addr).ok());
     /*let addr_parsed = match address.parse() {
       Ok(addr) => Some(addr),
       Err(err) => {
@@ -210,7 +207,7 @@ impl Listener {
     addr_parsed.map(|addr| {
       TcpListener {
         front:          addr,
-        public_address,
+        public_address: self.public_address,
         expect_proxy:   self.expect_proxy.unwrap_or(false),
       }
     })
@@ -291,7 +288,7 @@ impl FileAppFrontendConfig {
       .map(split_certificate_chain);
 
     Ok(HttpFrontendConfig {
-      address:           self.address.clone(),
+      address:           self.address,
       hostname:          self.hostname.clone().unwrap(),
       path_begin:        self.path_begin.clone().unwrap_or_default(),
       certificate:       certificate_opt,
@@ -328,6 +325,7 @@ pub struct FileAppConfig {
   pub send_proxy:            Option<bool>,
   #[serde(default)]
   pub load_balancing_policy: LoadBalancingAlgorithms,
+  pub answer_503:            Option<String>,
 }
 
 #[derive(Debug,Copy,Clone,PartialEq,Eq,Hash, Serialize, Deserialize)]
@@ -438,6 +436,11 @@ impl FileAppConfig {
           }
         }
 
+        let answer_503 = self.answer_503.as_ref().and_then(|path| Config::load_file(&path).map_err(|e| {
+          error!("cannot load 503 error page at path '{}': {:?}", path, e);
+          e
+        }).ok());
+
         Ok(AppConfig::Http(HttpAppConfig {
           app_id:            app_id.to_string(),
           frontends,
@@ -445,6 +448,7 @@ impl FileAppConfig {
           sticky_session:    self.sticky_session.unwrap_or(false),
           https_redirect:    self.https_redirect.unwrap_or(false),
           load_balancing_policy: self.load_balancing_policy,
+          answer_503,
         }))
       }
     }
@@ -463,12 +467,12 @@ pub struct HttpFrontendConfig {
 }
 
 impl HttpFrontendConfig {
-  pub fn generate_orders(&self, app_id: &str) -> Vec<Order> {
+  pub fn generate_orders(&self, app_id: &str) -> Vec<ProxyRequestData> {
     let mut v = Vec::new();
 
     if self.key.is_some() && self.certificate.is_some() {
 
-      v.push(Order::AddCertificate(AddCertificate{
+      v.push(ProxyRequestData::AddCertificate(AddCertificate{
         front: self.address,
         certificate: CertificateAndKey {
           key:               self.key.clone().unwrap(),
@@ -478,20 +482,15 @@ impl HttpFrontendConfig {
         names: vec!(self.hostname.clone()),
       }));
 
-      if let Some(f) = calculate_fingerprint(&self.certificate.as_ref().unwrap().as_bytes()[..]) {
-        v.push(Order::AddHttpsFront(HttpsFront {
-          app_id:      app_id.to_string(),
-          address:     self.address,
-          hostname:    self.hostname.clone(),
-          path_begin:  self.path_begin.clone(),
-          fingerprint: CertFingerprint(f),
-        }));
-      } else {
-        error!("cannot obtain the certificate's fingerprint");
-      }
+      v.push(ProxyRequestData::AddHttpsFront(HttpFront {
+        app_id:      app_id.to_string(),
+        address:     self.address,
+        hostname:    self.hostname.clone(),
+        path_begin:  self.path_begin.clone(),
+      }));
     } else {
       //create the front both for HTTP and HTTPS if possible
-      v.push(Order::AddHttpFront(HttpFront {
+      v.push(ProxyRequestData::AddHttpFront(HttpFront {
         app_id:     app_id.to_string(),
         address:    self.address,
         hostname:   self.hostname.clone(),
@@ -512,18 +511,20 @@ pub struct HttpAppConfig {
   pub sticky_session:    bool,
   pub https_redirect:    bool,
   pub load_balancing_policy: LoadBalancingAlgorithms,
+  pub answer_503:        Option<String>,
 }
 
 impl HttpAppConfig {
-  pub fn generate_orders(&self) -> Vec<Order> {
+  pub fn generate_orders(&self) -> Vec<ProxyRequestData> {
     let mut v = Vec::new();
 
-    v.push(Order::AddApplication(Application {
+    v.push(ProxyRequestData::AddApplication(Application {
       app_id: self.app_id.clone(),
       sticky_session: self.sticky_session,
       https_redirect: self.https_redirect,
       proxy_protocol: None,
       load_balancing_policy: self.load_balancing_policy,
+      answer_503: self.answer_503.clone(),
     }));
 
     for frontend in &self.frontends {
@@ -537,7 +538,7 @@ impl HttpAppConfig {
           weight: backend.weight.unwrap_or(100),
         });
 
-        v.push(Order::AddBackend(Backend {
+        v.push(ProxyRequestData::AddBackend(Backend {
           app_id:     self.app_id.clone(),
           backend_id:  format!("{}-{}", self.app_id, backend_count),
           address:    backend.address,
@@ -569,19 +570,20 @@ pub struct TcpAppConfig {
 }
 
 impl TcpAppConfig {
-  pub fn generate_orders(&self) -> Vec<Order> {
+  pub fn generate_orders(&self) -> Vec<ProxyRequestData> {
     let mut v = Vec::new();
 
-    v.push(Order::AddApplication(Application {
+    v.push(ProxyRequestData::AddApplication(Application {
       app_id: self.app_id.clone(),
       sticky_session: false,
       https_redirect: false,
       proxy_protocol: self.proxy_protocol.clone(),
       load_balancing_policy: self.load_balancing_policy,
+      answer_503: None,
     }));
 
     for frontend in &self.frontends {
-      v.push(Order::AddTcpFront(TcpFront {
+      v.push(ProxyRequestData::AddTcpFront(TcpFront {
         app_id:  self.app_id.clone(),
         address: frontend.address,
       }));
@@ -593,7 +595,7 @@ impl TcpAppConfig {
         weight: backend.weight.unwrap_or(100),
       });
 
-      v.push(Order::AddBackend(Backend {
+      v.push(ProxyRequestData::AddBackend(Backend {
         app_id:     self.app_id.clone(),
         backend_id: format!("{}-{}", self.app_id, backend_count),
         address:    backend.address,
@@ -616,7 +618,7 @@ pub enum AppConfig {
 }
 
 impl AppConfig {
-  pub fn generate_orders(&self) -> Vec<Order> {
+  pub fn generate_orders(&self) -> Vec<ProxyRequestData> {
     match *self {
       AppConfig::Http(ref http) => http.generate_orders(),
       AppConfig::Tcp(ref tcp)   => tcp.generate_orders(),
@@ -633,6 +635,7 @@ pub struct FileConfig {
   pub max_buffers:              Option<usize>,
   pub buffer_size:              Option<usize>,
   pub saved_state:              Option<String>,
+  pub automatic_state_save:     Option<bool>,
   pub log_level:                Option<String>,
   pub log_target:               Option<String>,
   #[serde(default)]
@@ -729,6 +732,10 @@ impl FileConfig {
         known_addresses.insert(listener.address, listener.protocol);
         if listener.expect_proxy == Some(true) {
           expect_proxy.insert(listener.address);
+        }
+
+        if listener.public_address.is_some() && listener.expect_proxy == Some(true) {
+          panic!("the listener on {} has incompatible options: it cannot use the expect proxy protocol and have a public_address field at the same time", &listener.address);
         }
 
         match listener.protocol {
@@ -838,6 +845,11 @@ impl FileConfig {
       path.to_str().map(|s| s.to_string()).unwrap()
     });
 
+    match (&self.saved_state, &self.automatic_state_save) {
+      (None, Some(true)) => panic!("cannot activate automatic state save if the 'saved_state` option is not set"),
+      _ => {}
+    }
+
     Config {
       config_path:    config_path.to_string(),
       command_socket: command_socket_path,
@@ -847,6 +859,7 @@ impl FileConfig {
       max_buffers: self.max_buffers.unwrap_or(1000),
       buffer_size: self.buffer_size.unwrap_or(16384),
       saved_state: self.saved_state,
+      automatic_state_save: self.automatic_state_save.unwrap_or(false),
       log_level: self.log_level.unwrap_or_else(|| String::from("info")),
       log_target: self.log_target.unwrap_or_else(|| String::from("stdout")),
       log_access_target: self.log_access_target,
@@ -880,6 +893,7 @@ pub struct Config {
   pub max_buffers:              usize,
   pub buffer_size:              usize,
   pub saved_state:              Option<String>,
+  pub automatic_state_save:     bool,
   pub log_level:                String,
   pub log_target:               String,
   #[serde(default)]
@@ -922,36 +936,36 @@ impl Config {
     FileConfig::load_from_path(path).map(|config| config.into(path))
   }
 
-  pub fn generate_config_messages(&self) -> Vec<ConfigMessage> {
+  pub fn generate_config_messages(&self) -> Vec<CommandRequest> {
     let mut v = Vec::new();
     let mut count = 0u8;
 
     for listener in &self.http_listeners {
-      v.push(ConfigMessage {
+      v.push(CommandRequest {
         id:       format!("CONFIG-{}", count),
         version:  PROTOCOL_VERSION,
-        proxy_id: None,
-        data:     ConfigCommand::ProxyConfiguration(Order::AddHttpListener(listener.clone())),
+        worker_id: None,
+        data:     CommandRequestData::Proxy(ProxyRequestData::AddHttpListener(listener.clone())),
       });
       count += 1;
     }
 
     for listener in &self.https_listeners {
-      v.push(ConfigMessage {
+      v.push(CommandRequest {
         id:       format!("CONFIG-{}", count),
         version:  PROTOCOL_VERSION,
-        proxy_id: None,
-        data:     ConfigCommand::ProxyConfiguration(Order::AddHttpsListener(listener.clone())),
+        worker_id: None,
+        data:     CommandRequestData::Proxy(ProxyRequestData::AddHttpsListener(listener.clone())),
       });
       count += 1;
     }
 
     for listener in &self.tcp_listeners {
-      v.push(ConfigMessage {
+      v.push(CommandRequest {
         id:       format!("CONFIG-{}", count),
         version:  PROTOCOL_VERSION,
-        proxy_id: None,
-        data:     ConfigCommand::ProxyConfiguration(Order::AddTcpListener(listener.clone())),
+        worker_id: None,
+        data:     CommandRequestData::Proxy(ProxyRequestData::AddTcpListener(listener.clone())),
       });
       count += 1;
     }
@@ -959,11 +973,11 @@ impl Config {
     for app in self.applications.values() {
       let mut orders = app.generate_orders();
       for order in orders.drain(..) {
-        v.push(ConfigMessage {
+        v.push(CommandRequest {
           id:       format!("CONFIG-{}", count),
           version:  PROTOCOL_VERSION,
-          proxy_id: None,
-          data:     ConfigCommand::ProxyConfiguration(order),
+          worker_id: None,
+          data:     CommandRequestData::Proxy(order),
         });
         count += 1;
       }
@@ -971,11 +985,11 @@ impl Config {
 
     if self.activate_listeners {
       for listener in &self.http_listeners {
-        v.push(ConfigMessage {
+        v.push(CommandRequest {
           id:       format!("CONFIG-{}", count),
           version:  PROTOCOL_VERSION,
-          proxy_id: None,
-          data:     ConfigCommand::ProxyConfiguration(Order::ActivateListener(ActivateListener{
+          worker_id: None,
+          data:     CommandRequestData::Proxy(ProxyRequestData::ActivateListener(ActivateListener{
             front:    listener.front,
             proxy:    ListenerType::HTTP,
             from_scm: false,
@@ -985,11 +999,11 @@ impl Config {
       }
 
       for listener in &self.https_listeners {
-        v.push(ConfigMessage {
+        v.push(CommandRequest {
           id:       format!("CONFIG-{}", count),
           version:  PROTOCOL_VERSION,
-          proxy_id: None,
-          data:     ConfigCommand::ProxyConfiguration(Order::ActivateListener(ActivateListener{
+          worker_id: None,
+          data:     CommandRequestData::Proxy(ProxyRequestData::ActivateListener(ActivateListener{
             front:    listener.front,
             proxy:    ListenerType::HTTPS,
             from_scm: false,
@@ -999,11 +1013,11 @@ impl Config {
       }
 
       for listener in &self.tcp_listeners {
-        v.push(ConfigMessage {
+        v.push(CommandRequest {
           id:       format!("CONFIG-{}", count),
           version:  PROTOCOL_VERSION,
-          proxy_id: None,
-          data:     ConfigCommand::ProxyConfiguration(Order::ActivateListener(ActivateListener{
+          worker_id: None,
+          data:     CommandRequestData::Proxy(ProxyRequestData::ActivateListener(ActivateListener{
             front:    listener.front,
             proxy:    ListenerType::TCP,
             from_scm: false,
@@ -1120,6 +1134,7 @@ mod tests {
     let config = FileConfig {
       command_socket: Some(String::from("./command_folder/sock")),
       saved_state: None,
+      automatic_state_save: None,
       worker_count: Some(2),
       worker_automatic_restart: Some(true),
       handle_process_affinity: None,

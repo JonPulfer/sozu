@@ -12,23 +12,22 @@ use std::time::Duration;
 use libc::pid_t;
 use nix::unistd::Pid;
 use nix::sys::signal::{kill,Signal};
-use nix::sys::wait::{waitpid,WaitStatus,WaitPidFlag};
 
-use sozu::network::metrics::METRICS;
+use sozu::metrics::METRICS;
 use sozu_command::config::Config;
 use sozu_command::channel::Channel;
 use sozu_command::state::ConfigState;
-use sozu_command::data::{ConfigMessage,ConfigMessageAnswer,ConfigMessageStatus,RunState};
-use sozu_command::messages::{OrderMessage,OrderMessageAnswer,OrderMessageStatus};
+use sozu_command::command::{self,CommandRequest,CommandResponse,CommandResponseData,CommandStatus,RunState};
+use sozu_command::proxy::{ProxyRequest,ProxyResponse,ProxyResponseData};
 use sozu_command::scm_socket::{Listeners,ScmSocket};
 
+pub mod executor;
 pub mod orders;
 pub mod client;
-pub mod state;
 
 use worker::{start_worker, get_executable_path};
 use self::client::CommandClient;
-use self::state::MessageType;
+use self::executor::{Executor, StateChange};
 
 const SERVER: Token = Token(0);
 const HALF_USIZE: usize = 0x8000000000000000usize;
@@ -50,16 +49,16 @@ impl From<FrontToken> for usize {
 
 pub struct Worker {
   pub id:            u32,
-  pub channel:       Channel<OrderMessage,OrderMessageAnswer>,
+  pub channel:       Channel<ProxyRequest,ProxyResponse>,
   pub token:         Option<Token>,
   pub pid:           pid_t,
   pub run_state:     RunState,
-  pub queue:         VecDeque<OrderMessage>,
+  pub queue:         VecDeque<ProxyRequest>,
   pub scm:           ScmSocket,
 }
 
 impl Worker {
-  pub fn new(id: u32, pid: pid_t, channel: Channel<OrderMessage,OrderMessageAnswer>, scm: ScmSocket, _: &Config)
+  pub fn new(id: u32, pid: pid_t, channel: Channel<ProxyRequest,ProxyResponse>, scm: ScmSocket, _: &Config)
     -> Worker {
     Worker {
       id:         id,
@@ -72,7 +71,7 @@ impl Worker {
     }
   }
 
-  pub fn push_message(&mut self, message: OrderMessage) {
+  pub fn push_message(&mut self, message: ProxyRequest) {
     self.queue.push_back(message);
     self.channel.interest.insert(Ready::writable());
   }
@@ -95,23 +94,23 @@ pub struct ProxyConfiguration {
 }
 
 pub struct CommandServer {
-  sock:            UnixListener,
-  buffer_size:     usize,
-  max_buffer_size: usize,
-  clients:         Slab<CommandClient,FrontToken>,
-  proxies:         HashMap<Token, Worker>,
-  next_id:         u32,
-  state:           ConfigState,
-  pub poll:        Poll,
-  config:          Config,
-  token_count:     usize,
-  order_state:     state::OrderState,
-  must_stop:       bool,
-  executable_path: String,
+  sock:              UnixListener,
+  buffer_size:       usize,
+  max_buffer_size:   usize,
+  clients:           Slab<CommandClient,FrontToken>,
+  workers:           HashMap<Token, Worker>,
+  event_subscribers: Vec<FrontToken>,
+  next_id:           u32,
+  state:             ConfigState,
+  pub poll:          Poll,
+  config:            Config,
+  token_count:       usize,
+  must_stop:         bool,
+  executable_path:   String,
   //caching the number of backends instead of going through the whole state.backends hashmap
-  backends_count:  usize,
+  backends_count:    usize,
   //caching the number of frontends instead of going through the whole state.http/hhtps/tcp_fronts hashmaps
-  frontends_count: usize,
+  frontends_count:   usize,
 }
 
 impl CommandServer {
@@ -140,7 +139,7 @@ impl CommandServer {
     }
   }
 
-  fn new(srv: UnixListener, config: Config, mut proxy_vec: Vec<Worker>, poll: Poll) -> CommandServer {
+  fn new(srv: UnixListener, config: Config, mut worker_vec: Vec<Worker>, poll: Poll) -> CommandServer {
     //FIXME: verify this
     poll.register(&srv, Token(0), Ready::readable(), PollOpt::edge() | PollOpt::oneshot()).unwrap();
     METRICS.with(|metrics| {
@@ -152,9 +151,9 @@ impl CommandServer {
     });
 
 
-    let next_id = proxy_vec.len();
+    let next_id = worker_vec.len();
 
-    let mut proxies = HashMap::new();
+    let mut workers = HashMap::new();
 
     let mut token_count = 1;
     //FIXME: verify there's at least one worker
@@ -162,13 +161,13 @@ impl CommandServer {
     let state: ConfigState = Default::default();
 
 
-    for mut proxy in proxy_vec.drain(..) {
+    for mut worker in worker_vec.drain(..) {
       token_count += 1;
-      poll.register(&proxy.channel.sock, Token(token_count),
+      poll.register(&worker.channel.sock, Token(token_count),
         Ready::readable() | Ready::writable() | UnixReady::error() | UnixReady::hup(),
         PollOpt::edge()).unwrap();
-      proxy.token = Some(Token(token_count));
-      proxies.insert(Token(token_count), proxy);
+      worker.token = Some(Token(token_count));
+      workers.insert(Token(token_count), worker);
     }
 
     let path = unsafe { get_executable_path() };
@@ -177,21 +176,21 @@ impl CommandServer {
     let frontends_count = state.count_frontends();
 
     CommandServer {
-      sock:            srv,
-      buffer_size:     config.command_buffer_size,
-      max_buffer_size: config.max_command_buffer_size,
-      clients:         Slab::with_capacity(128),
-      proxies:         proxies,
-      next_id:         next_id as u32,
-      state:           state,
-      poll:            poll,
-      config:          config,
-      token_count:     token_count,
-      order_state:     state::OrderState::new(),
-      must_stop:       false,
-      executable_path: path,
-      backends_count:  backends_count,
-      frontends_count:  frontends_count,
+      sock:              srv,
+      buffer_size:       config.command_buffer_size,
+      max_buffer_size:   config.max_command_buffer_size,
+      clients:           Slab::with_capacity(128),
+      event_subscribers: Vec::new(),
+      workers:           workers,
+      next_id:           next_id as u32,
+      state:             state,
+      poll:              poll,
+      config:            config,
+      token_count:       token_count,
+      must_stop:         false,
+      executable_path:   path,
+      backends_count:    backends_count,
+      frontends_count:   frontends_count,
     }
   }
 
@@ -252,13 +251,13 @@ impl CommandServer {
         }
 
         {
-          let tokens: Vec<Token> = self.proxies.iter().filter(|&(_, worker)| worker.can_handle_events()).map(|(token, _)| token.clone()).collect();
+          let tokens: Vec<Token> = self.workers.iter().filter(|&(_, worker)| worker.can_handle_events()).map(|(token, _)| token.clone()).collect();
 
           if ! tokens.is_empty() {
             did_something = true;
           }
 
-          //for (ref token, ref worker) in self.proxies.iter() {
+          //for (ref token, ref worker) in self.workers.iter() {
           //  let ids: Vec<&str> = worker.queue.iter().map(|msg| msg.id.as_str()).collect();
             //info!("worker {}, readiness = {:#?}, interest = {:#?}, queue = {}", token.0, worker.channel.readiness,
             //  worker.channel.interest, ids.len());
@@ -270,10 +269,12 @@ impl CommandServer {
           }
         }
 
+        self.run_executor();
         if ! did_something {
           break;
         }
       }
+
 
       METRICS.with(|metrics| {
         (*metrics.borrow_mut()).send_data();
@@ -307,12 +308,15 @@ impl CommandServer {
         });
       },
       Token(i) if i < HALF_USIZE + 1 => {
-        if let Some(ref mut proxy) =self.proxies.get_mut(&Token(i)) {
-          proxy.channel.handle_events(events);
+        if let Some(ref mut worker) =self.workers.get_mut(&Token(i)) {
+          worker.channel.handle_events(events);
           let uevent = UnixReady::from(events);
           if uevent.is_hup() {
-            if proxy.run_state != RunState::Stopped && proxy.run_state != RunState::Stopping {
-              proxy.run_state = RunState::NotAnswering;
+            if worker.run_state != RunState::Stopped && worker.run_state != RunState::Stopping {
+              worker.run_state = RunState::NotAnswering;
+            }
+            if worker.run_state == RunState::Stopping {
+              worker.run_state = RunState::Stopped;
             }
           }
 
@@ -333,37 +337,60 @@ impl CommandServer {
     //trace!("ready end: {:?} -> {:?}", token, events);
   }
 
+  pub fn run_executor(&mut self) {
+    Executor::run();
+
+    while let Some((client_token, answer)) = Executor::get_client_message() {
+      self.clients.get_mut(client_token).map(|cl| cl.push_message(answer));
+    }
+
+    while let Some((worker_token, message)) = Executor::get_worker_message() {
+      self.workers.get_mut(&worker_token).map(|w| w.push_message(message));
+    }
+
+    while let Some(state_change) = Executor::get_state_change() {
+      match state_change {
+        StateChange::StopWorker(token) => {
+          self.workers.get_mut(&token).map(|w| w.run_state = RunState::Stopped);
+        },
+        StateChange::StopMaster => {
+          self.must_stop = true;
+        }
+      }
+    }
+  }
+
   pub fn handle_worker_events(&mut self, token: Token) {
-    if !self.proxies.contains_key(&token) {
+    if !self.workers.contains_key(&token) {
       return;
     }
 
     let mut messages = {
       let mut messages = Vec::new();
-      let ref mut proxy = self.proxies.get_mut(&token).unwrap();
+      let ref mut worker = self.workers.get_mut(&token).unwrap();
       loop {
-        if !proxy.queue.is_empty() {
-          proxy.channel.interest.insert(Ready::writable());
+        if !worker.queue.is_empty() {
+          worker.channel.interest.insert(Ready::writable());
         }
 
-        //trace!("worker[{}] readiness = {:#?}, interest = {:#?}, queue = {} messages", token.0, proxy.channel.readiness,
-        //  proxy.channel.interest, proxy.queue.len());
+        //trace!("worker[{}] readiness = {:#?}, interest = {:#?}, queue = {} messages", token.0, worker.channel.readiness,
+        //  worker.channel.interest, worker.queue.len());
 
-        if proxy.channel.readiness() == Ready::empty() {
+        if worker.channel.readiness() == Ready::empty() {
           break;
         }
 
-        if proxy.channel.readiness().is_readable() {
-          let _ = proxy.channel.readable().map_err(|e| {
+        if worker.channel.readiness().is_readable() {
+          let _ = worker.channel.readable().map_err(|e| {
             error!("could not read from worker socket: {:?}", e);
           });
 
           loop {
-            if let Some(msg) = proxy.channel.read_message() {
+            if let Some(msg) = worker.channel.read_message() {
               messages.push(msg);
             } else {
-              if (proxy.channel.interest & proxy.channel.readiness).is_readable() {
-                let _ = proxy.channel.readable().map_err(|e| {
+              if (worker.channel.interest & worker.channel.readiness).is_readable() {
+                let _ = worker.channel.readable().map_err(|e| {
                   error!("could not read from worker socket: {:?}", e);
                 });
                 continue;
@@ -374,33 +401,33 @@ impl CommandServer {
           }
         }
 
-        if !proxy.queue.is_empty() {
-          proxy.channel.interest.insert(Ready::writable());
+        if !worker.queue.is_empty() {
+          worker.channel.interest.insert(Ready::writable());
         }
 
-        if proxy.channel.readiness.is_writable() {
+        if worker.channel.readiness.is_writable() {
           loop {
-            if let Some(msg) = proxy.queue.pop_front() {
-              if !proxy.channel.write_message(&msg) {
-                proxy.queue.push_front(msg);
+            if let Some(msg) = worker.queue.pop_front() {
+              if !worker.channel.write_message(&msg) {
+                worker.queue.push_front(msg);
               }
             }
 
-            if proxy.channel.back_buf.available_data() > 0 {
-              let res = proxy.channel.writable();
+            if worker.channel.back_buf.available_data() > 0 {
+              let res = worker.channel.writable();
               if let Err(e) = res {
                 error!("could not write to worker socket: {:?}", e);
-                if proxy.run_state != RunState::Stopped && proxy.run_state != RunState::Stopping {
-                  proxy.run_state = RunState::NotAnswering;
+                if worker.run_state != RunState::Stopped && worker.run_state != RunState::Stopping {
+                  worker.run_state = RunState::NotAnswering;
                 }
               }
             }
 
-            if !proxy.channel.readiness.is_writable() {
+            if !worker.channel.readiness.is_writable() {
               break;
             }
 
-            if proxy.channel.back_buf.available_data() == 0 && proxy.queue.len() == 0 {
+            if worker.channel.back_buf.available_data() == 0 && worker.queue.len() == 0 {
               break;
             }
           }
@@ -414,8 +441,10 @@ impl CommandServer {
       self.handle_worker_message(token, msg);
     }
 
-    let worker_run_state = self.proxies.get(&token).as_ref().map(|proxy| proxy.run_state);
-    if self.config.worker_automatic_restart && worker_run_state == Some(RunState::NotAnswering) {
+    self.run_executor();
+
+    let worker_run_state = self.workers.get(&token).as_ref().map(|worker| worker.run_state);
+    if (self.config.worker_automatic_restart && worker_run_state == Some(RunState::NotAnswering)) || worker_run_state == Some(RunState::Stopping) {
       self.check_worker_status(token);
     }
   }
@@ -427,7 +456,13 @@ impl CommandServer {
         let _ = self.poll.deregister(&self.clients[conn_token].channel.sock).map_err(|e| {
           error!("could not unregister client socket: {:?}", e);
         });
+
         self.clients.remove(conn_token);
+
+        if let Some(pos) = self.event_subscribers.iter().position(|t| t == &conn_token) {
+          let _ = self.event_subscribers.remove(pos);
+        }
+
         trace!("closed client [{}]", conn_token.0);
       } else {
         loop {
@@ -453,9 +488,9 @@ impl CommandServer {
                   if client.channel.back_buf.capacity() == capacity {
                     //we cannot grow the channel further
                     error!("cannot write message back to config client: message is larger than max_buffer_size");
-                    client.push_message(ConfigMessageAnswer::new(
+                    client.push_message(CommandResponse::new(
                       msg.id,
-                      ConfigMessageStatus::Error,
+                      CommandStatus::Error,
                       "cannot write message back to config client because message is larger than max_buffer_size".to_string(),
                       None
                     ));
@@ -489,142 +524,110 @@ impl CommandServer {
                 break;
               }
             }
+
+            self.run_executor();
           }
         }
       }
     }
   }
 
-  fn handle_worker_message(&mut self, token: Token, msg: OrderMessageAnswer) {
-    trace!("worker handle message: token {:?} got answer msg: {:?}", token, msg);
-    if msg.status != OrderMessageStatus::Processing {
+  fn handle_worker_message(&mut self, token: Token, msg: ProxyResponse) {
+    if let Some(ProxyResponseData::Event(data)) = msg.data {
+      let event: command::Event = data.into();
+      for client_token in self.event_subscribers.iter() {
+        let event = CommandResponse::new(
+          msg.id.to_string(),
+          CommandStatus::Processing,
+          format!("{}", token.0),
+          Some(CommandResponseData::Event(event.clone()))
+        );
 
-      let tag = self.proxies.get(&token).map(|worker| worker.id.to_string()).unwrap_or(String::from(""));
-
-      match msg.status {
-        OrderMessageStatus::Processing => {
-          //FIXME: right now, do nothing with the curent tasks
-        },
-        OrderMessageStatus::Error(s) => {
-          if let Some(task) = self.order_state.error(&msg.id, token, tag, msg.data) {
-            let opt_token = task.client.clone();
-            let id        = task.id.clone();
-            let ok = task.ok.len();
-            let failures = task.error.clone();
-            let answer = ConfigMessageAnswer::new(
-              id,
-              ConfigMessageStatus::Error,
-              format!("ok: {} messages, error: {:?}, message: {}", ok, &failures, s.clone()),
-              task.generate_data(&self.state),
-            );
-            error!("{}: {} successful messages, failures: {:?}, reason: {}", msg.id, ok, &failures, s.clone());
-
-            if let Some(client_token) = opt_token {
-              self.clients.get_mut(client_token).map(|cl| cl.push_message(answer));
-            }
-          }
-        },
-        OrderMessageStatus::Ok => {
-          if let Some(task) = self.order_state.ok(&msg.id, token, tag, msg.data) {
-            let opt_token = task.client.clone();
-            let id        = task.id.clone();
-            let answer = if task.error.is_empty() {
-              if task.message_type == MessageType::Stop {
-                self.must_stop = true;
-              }
-
-              if task.message_type == MessageType::Stop || task.message_type == MessageType::StopWorker {
-                let ref mut proxy = self.proxies.get_mut(&token).expect("there should be a worker at that token");
-                proxy.run_state = RunState::Stopped;
-              }
-
-              ConfigMessageAnswer::new(
-                id,
-                ConfigMessageStatus::Ok,
-                format!("ok: {} messages, error: {:#?}", task.ok.len(), task.error),
-                task.generate_data(&self.state),
-              )
-            } else {
-              error!("{}: {} successful messages, failures: {:?}", msg.id, task.ok.len(), task.error);
-
-              ConfigMessageAnswer::new(
-                id,
-                ConfigMessageStatus::Error,
-                format!("ok: {:#?}, error: {:#?}", task.ok, task.error),
-                None,
-              )
-            };
-
-            if let Some(client_token) = opt_token {
-              self.clients.get_mut(client_token).map(|cl| cl.push_message(answer));
-            }
-          }
-        }
+        self.clients.get_mut(*client_token).map(|cl| cl.push_message(event));
       }
+    } else {
+      Executor::handle_message(token, msg);
     }
   }
 
   pub fn check_worker_status(&mut self, token: Token) {
     {
-      let ref mut proxy = self.proxies.get_mut(&token).expect("there should be a worker at that token");
-      let res = waitpid(Pid::from_raw(proxy.pid), Some(WaitPidFlag::WNOHANG));
+      let ref mut worker = self.workers.get_mut(&token).expect("there should be a worker at that token");
+      let res = kill(Pid::from_raw(worker.pid), None);
 
-      if let Ok(WaitStatus::StillAlive) = res {
-        if proxy.run_state == RunState::NotAnswering {
-          error!("worker process {} (PID = {}) not answering, killing and replacing", proxy.id, proxy.pid);
-          if let Err(e) = kill(Pid::from_raw(proxy.pid), Signal::SIGKILL) {
+      if let Ok(()) = res {
+        if worker.run_state == RunState::NotAnswering {
+          error!("worker process {} (PID = {}) not answering, killing and replacing", worker.id, worker.pid);
+          if let Err(e) = kill(Pid::from_raw(worker.pid), Signal::SIGKILL) {
             error!("failed to kill the worker process: {:?}", e);
           } else {
-            proxy.run_state = RunState::Stopped;
+            worker.run_state = RunState::Stopped;
           }
         } else {
           return;
         }
 
       } else {
-        if proxy.run_state == RunState::NotAnswering {
-          error!("worker process {} (PID = {}) stopped running, replacing", proxy.id, proxy.pid);
+        if worker.run_state == RunState::NotAnswering {
+          error!("worker process {} (PID = {}) stopped running, replacing", worker.id, worker.pid);
+        } else if worker.run_state == RunState::Stopping {
+          info!("worker process {} (PID = {}) not detected, assuming it stopped", worker.id, worker.pid);
+          worker.run_state = RunState::Stopped;
+          let _ = self.poll.deregister(&worker.channel.sock);
+          return;
         } else {
           error!("failed to check process status: {:?}", res);
           return;
         }
       }
 
-      let _ = self.poll.deregister(&proxy.channel.sock);
+      let _ = self.poll.deregister(&worker.channel.sock);
     }
 
-    self.proxies.remove(&token);
+    self.workers.remove(&token);
 
-    incr!("worker_restart");
+    if self.config.worker_automatic_restart {
+      incr!("worker_restart");
 
-    let id = self.next_id;
-    let listeners = Some(Listeners {
-      http: Vec::new(),
-      tls:  Vec::new(),
-      tcp:  Vec::new(),
-    });
+      let id = self.next_id;
+      let listeners = Some(Listeners {
+        http: Vec::new(),
+        tls:  Vec::new(),
+        tcp:  Vec::new(),
+      });
 
-    if let Ok(mut worker) = start_worker(id, &self.config, self.executable_path.clone(), &self.state, listeners) {
-      info!("created new worker: {}", id);
-      self.next_id += 1;
-      let worker_token = self.token_count + 1;
-      self.token_count = worker_token;
-      worker.token     = Some(Token(worker_token));
+      if let Ok(mut worker) = start_worker(id, &self.config, self.executable_path.clone(), &self.state, listeners) {
+        info!("created new worker: {}", id);
+        self.next_id += 1;
+        let worker_token = self.token_count + 1;
+        self.token_count = worker_token;
+        worker.token     = Some(Token(worker_token));
 
-      debug!("registering new sock {:?} at token {:?} for id {} (sock error: {:?})",
-        worker.channel.sock, worker_token, worker.id, worker.channel.sock.take_error());
+        debug!("registering new sock {:?} at token {:?} for id {} (sock error: {:?})",
+          worker.channel.sock, worker_token, worker.id, worker.channel.sock.take_error());
 
-      self.poll.register(&worker.channel.sock, Token(worker_token),
-        Ready::readable() | Ready::writable() | UnixReady::error() | UnixReady::hup(),
-        PollOpt::edge()).unwrap();
-      worker.token = Some(Token(worker_token));
-      self.proxies.insert(Token(worker_token), worker);
+        let mut count = 0;
+        let mut orders = self.state.generate_activate_orders();
+        for order in orders.drain(..) {
+          worker.push_message(ProxyRequest {
+            id: format!("RESTART-{}-ACTIVATE-{}", id, count),
+            order
+          });
+          count += 1;
+        }
 
+        self.poll.register(&worker.channel.sock, Token(worker_token),
+          Ready::readable() | Ready::writable() | UnixReady::error() | UnixReady::hup(),
+          PollOpt::edge()).unwrap();
+        worker.token = Some(Token(worker_token));
+        self.workers.insert(Token(worker_token), worker);
+
+      }
     }
   }
 }
 
-pub fn start(config: Config, command_socket_path: String, proxies: Vec<Worker>) {
+pub fn start(config: Config, command_socket_path: String, workers: Vec<Worker>) {
   let saved_state     = config.saved_state_path();
 
   let event_loop = Poll::new().unwrap();
@@ -648,7 +651,7 @@ pub fn start(config: Config, command_socket_path: String, proxies: Vec<Worker>) 
         return;
       }
 
-      let mut server = CommandServer::new(srv, config.clone(), proxies, event_loop);
+      let mut server = CommandServer::new(srv, config.clone(), workers, event_loop);
 
       server.load_static_application_configuration();
 
@@ -662,14 +665,14 @@ pub fn start(config: Config, command_socket_path: String, proxies: Vec<Worker>) 
 
       info!("waiting for configuration client connections");
       server.run();
-      //event_loop.run(&mut CommandServer::new(srv, proxies, buffer_size, max_buffer_size)).unwrap()
+      //event_loop.run(&mut CommandServer::new(srv, workers, buffer_size, max_buffer_size)).unwrap()
     },
     Err(e) => {
       error!("could not create unix socket: {:?}", e);
       // the workers did not even get the configuration, we can kill them right away
-      for proxy in proxies {
-        error!("killing worker n°{} (PID {})", proxy.id, proxy.pid);
-        let _ = kill(Pid::from_raw(proxy.pid), Signal::SIGKILL).map_err(|e| {
+      for worker in workers {
+        error!("killing worker n°{} (PID {})", worker.id, worker.pid);
+        let _ = kill(Pid::from_raw(worker.pid), Signal::SIGKILL).map_err(|e| {
           error!("could not kill worker: {:?}", e);
         });
       }

@@ -11,18 +11,18 @@ mod command;
 mod cli;
 
 use std::io;
-use std::net::SocketAddr;
 use structopt::StructOpt;
 
 use sozu_command::config::Config;
 use sozu_command::channel::Channel;
-use sozu_command::data::{ConfigMessage,ConfigMessageAnswer};
+use sozu_command::command::{CommandRequest,CommandResponse};
 
 use command::{add_application,remove_application,dump_state,load_state,
   save_state, soft_stop, hard_stop, upgrade_master, status,metrics,
   remove_backend, add_backend, remove_http_frontend, add_http_frontend,
   remove_tcp_frontend, add_tcp_frontend, add_certificate, remove_certificate,
-  replace_certificate, query_application, logging_filter, upgrade_worker};
+  replace_certificate, query_application, logging_filter, upgrade_worker,
+  events};
 
 use cli::*;
 
@@ -32,15 +32,22 @@ fn main() {
   let config_file = matches.config;
 
   let config  = Config::load_from_path(config_file.as_str()).expect("could not parse configuration file");
+
+  // If the command is `config check` then exit because if we are here, the configuration is valid
+  if let SubCmd::Config{ cmd: ConfigCmd::Check{} } = matches.cmd {
+    println!("Configuration file is valid");
+    std::process::exit(0);
+  }
+
   let channel = create_channel(&config.command_socket_path()).expect("could not connect to the command unix socket");
   let timeout: u64 = matches.timeout.unwrap_or(config.ctl_command_timeout);
 
   match matches.cmd {
-    SubCmd::Shutdown{ hard } => {
+    SubCmd::Shutdown{ hard, worker} => {
       if hard {
-        hard_stop(channel, timeout);
+        hard_stop(channel, worker, timeout);
       } else {
-        soft_stop(channel);
+        soft_stop(channel, worker);
       }
     },
     SubCmd::Upgrade { worker: None } => upgrade_master(channel, &config.command_socket_path()),
@@ -63,43 +70,46 @@ fn main() {
     },
     SubCmd::Backend{ cmd } => {
       match cmd {
-        BackendCmd::Add{ id, backend_id, ip, port, sticky_id, backup } => add_backend(channel, timeout, &id, &backend_id, &ip, port, sticky_id, backup),
-        BackendCmd::Remove{ id, backend_id, ip, port } => remove_backend(channel, timeout, &id, &backend_id, &ip, port),
+        BackendCmd::Add{ id, backend_id, address, sticky_id, backup } => add_backend(channel, timeout, &id, &backend_id, address, sticky_id, backup),
+        BackendCmd::Remove{ id, backend_id, address } => remove_backend(channel, timeout, &id, &backend_id, address),
       }
     },
     SubCmd::Frontend{ cmd } => {
       match cmd {
         FrontendCmd::Http{ cmd } => match cmd {
-          HttpFrontendCmd::Add{ id, hostname, path_begin, path_to_certificate, listener_ip, listener_port } => {
-            let address: SocketAddr = (format!("{}:{}", listener_ip, listener_port)).parse().expect("could not parse listener address");
-            add_http_frontend(channel, timeout, &id, address, &hostname, &path_begin.unwrap_or("".to_string()), path_to_certificate)
+          HttpFrontendCmd::Add{ id, hostname, path_begin, address } => {
+            add_http_frontend(channel, timeout, &id, address, &hostname, &path_begin.unwrap_or("".to_string()), false)
           },
-          HttpFrontendCmd::Remove{ id, hostname, path_begin, path_to_certificate, listener_ip, listener_port } => {
-            let address: SocketAddr = (format!("{}:{}", listener_ip, listener_port)).parse().expect("could not parse listener address");
-            remove_http_frontend(channel, timeout, &id, address, &hostname, &path_begin.unwrap_or("".to_string()), path_to_certificate)
+          HttpFrontendCmd::Remove{ id, hostname, path_begin, address } => {
+            remove_http_frontend(channel, timeout, &id, address, &hostname, &path_begin.unwrap_or("".to_string()), false)
+          },
+        },
+        FrontendCmd::Https{ cmd } => match cmd {
+          HttpFrontendCmd::Add{ id, hostname, path_begin, address } => {
+            add_http_frontend(channel, timeout, &id, address, &hostname, &path_begin.unwrap_or("".to_string()), true)
+          },
+          HttpFrontendCmd::Remove{ id, hostname, path_begin, address } => {
+            remove_http_frontend(channel, timeout, &id, address, &hostname, &path_begin.unwrap_or("".to_string()), true)
           },
         },
         FrontendCmd::Tcp { cmd } => match cmd {
-          TcpFrontendCmd::Add{ id, ip_address, port } =>
-            add_tcp_frontend(channel, timeout, &id, &ip_address, port),
-          TcpFrontendCmd::Remove{ id, ip_address, port } =>
-            remove_tcp_frontend(channel, timeout, &id, &ip_address, port),
+          TcpFrontendCmd::Add{ id, address } =>
+            add_tcp_frontend(channel, timeout, &id, address),
+          TcpFrontendCmd::Remove{ id, address } =>
+            remove_tcp_frontend(channel, timeout, &id, address),
         }
       }
     },
     SubCmd::Certificate{ cmd } => {
       match cmd {
-        CertificateCmd::Add{ certificate, chain, key, listener_ip, listener_port } => {
-          let address: SocketAddr = (format!("{}:{}", listener_ip, listener_port)).parse().expect("could not parse listener address");
-          add_certificate(channel, timeout, address, &certificate, &chain, key.unwrap_or("missing key path".to_string()).as_str())
+        CertificateCmd::Add{ certificate, chain, key, address } => {
+          add_certificate(channel, timeout, address, &certificate, &chain, &key)
         },
-        CertificateCmd::Remove{ certificate, listener_ip, listener_port } => {
-          let address: SocketAddr = (format!("{}:{}", listener_ip, listener_port)).parse().expect("could not parse listener address");
+        CertificateCmd::Remove{ certificate, address } => {
           remove_certificate(channel, timeout, address, &certificate)
         },
-        CertificateCmd::Replace{ certificate, chain, key, old_certificate,  listener_ip, listener_port } => {
-          let address: SocketAddr = (format!("{}:{}", listener_ip, listener_port)).parse().expect("could not parse listener address");
-          replace_certificate(channel, timeout, address, &certificate, &chain, &key.unwrap_or("missing key path".to_string()).as_str(), &old_certificate)
+        CertificateCmd::Replace{ certificate, chain, key, old_certificate, address } => {
+          replace_certificate(channel, timeout, address, &certificate, &chain, &key, &old_certificate)
         },
       }
     },
@@ -108,10 +118,12 @@ fn main() {
         QueryCmd::Applications{ id, domain } => query_application(channel, json, id, domain),
       }
     },
+    SubCmd::Config{ cmd: _ } => {}, // noop, handled at the beginning of the method
+    SubCmd::Events => events(channel),
   }
 }
 
-pub fn create_channel(path: &str) -> Result<Channel<ConfigMessage,ConfigMessageAnswer>,io::Error> {
+pub fn create_channel(path: &str) -> Result<Channel<CommandRequest,CommandResponse>,io::Error> {
   Channel::from_path(path, 10_000, 2_000_000)
     .and_then(|mut channel| {
       channel.set_nonblocking(false);

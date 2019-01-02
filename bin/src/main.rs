@@ -1,6 +1,7 @@
 #[macro_use] extern crate nom;
 #[macro_use] extern crate clap;
 #[macro_use] extern crate serde_derive;
+#[macro_use] extern crate lazy_static;
 extern crate mio;
 extern crate mio_uds;
 extern crate serde_json;
@@ -10,6 +11,7 @@ extern crate slab;
 extern crate rand;
 extern crate nix;
 extern crate tempfile;
+extern crate futures;
 #[macro_use] extern crate sozu_lib as sozu;
 #[macro_use] extern crate sozu_command_lib as sozu_command;
 
@@ -35,7 +37,7 @@ use libc::{cpu_set_t,pid_t};
 
 use command::Worker;
 use worker::{start_workers,get_executable_path};
-use sozu::network::metrics::METRICS;
+use sozu::metrics::METRICS;
 
 enum StartupError {
   ConfigurationFileNotSpecified,
@@ -205,7 +207,7 @@ fn check_process_limits(config: &Config) -> Result<(), StartupError> {
 
   // check if all proxies are under the hard limit
   if config.max_connections > hard_limit {
-    let error = format!("At least one proxy can't have that much of connections. \
+    let error = format!("At least one worker can't have that many connections. \
             Current max file descriptor hard limit is: {}", hard_limit);
     return Err(StartupError::TooManyAllowedConnectionsForWorker(error));
   }
